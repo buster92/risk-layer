@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Account — RiskLayer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0b0d;
+    --surface: #111318;
+    --surface2: #181c22;
+    --border: #1e232d;
+    --border2: #252c38;
+    --text: #c8d0dc;
+    --text-dim: #5a6478;
+    --text-mid: #8292a8;
+    --amber: #e8a020;
+    --amber-dim: rgba(232,160,32,0.12);
+    --green: #2ec97e;
+    --green-dim: rgba(46,201,126,0.10);
+    --red: #e05252;
+    --mono: 'IBM Plex Mono', monospace;
+    --serif: 'Instrument Serif', serif;
+    --radius: 4px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+    z-index: 9999;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    height: 58px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .logo-word {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 20px;
+    color: #fff;
+    letter-spacing: -0.5px;
+    text-decoration: none;
+  }
+
+  .header-nav {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .btn {
+    padding: 7px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    font-weight: 500;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    text-decoration: none;
+    display: inline-block;
+  }
+
+  .btn-ghost {
+    background: none;
+    border: 1px solid var(--border2);
+    color: var(--text-mid);
+  }
+  .btn-ghost:hover { border-color: var(--text-mid); color: var(--text); }
+
+  .btn-primary {
+    background: var(--amber);
+    border: 1px solid var(--amber);
+    color: #000;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #f0aa28; }
+
+  .btn-danger {
+    background: none;
+    border: 1px solid rgba(224,82,82,0.3);
+    color: var(--red);
+  }
+  .btn-danger:hover { background: rgba(224,82,82,0.08); }
+
+  main {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 48px 24px;
+  }
+
+  .page-title {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 28px;
+    color: #fff;
+    margin-bottom: 32px;
+  }
+
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+
+  .section-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  .section-body { padding: 20px; }
+
+  .info-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .info-row:last-child { border-bottom: none; }
+
+  .info-label { color: var(--text-dim); }
+  .info-val { color: var(--text); font-weight: 500; }
+
+  .plan-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 2px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .badge-pro  { background: var(--amber-dim); border: 1px solid rgba(232,160,32,0.4); color: var(--amber); }
+  .badge-free { background: var(--surface2);  border: 1px solid var(--border2);       color: var(--text-dim); }
+
+  .status-active   { color: var(--green); }
+  .status-canceled { color: var(--text-dim); }
+  .status-past_due { color: var(--red); }
+
+  .upgrade-box {
+    padding: 24px;
+    background: linear-gradient(135deg, var(--surface) 0%, rgba(232,160,32,0.04) 100%);
+    border: 1px solid rgba(232,160,32,0.25);
+    border-radius: 6px;
+    margin-top: 20px;
+  }
+
+  .upgrade-box h3 {
+    font-size: 16px;
+    color: #fff;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+
+  .upgrade-box p {
+    font-size: 12px;
+    color: var(--text-mid);
+    line-height: 1.7;
+    margin-bottom: 18px;
+  }
+
+  .upgrade-features {
+    list-style: none;
+    margin-bottom: 20px;
+  }
+
+  .upgrade-features li {
+    font-size: 11px;
+    color: var(--text-mid);
+    padding: 4px 0;
+    display: flex;
+    gap: 8px;
+  }
+
+  .upgrade-features li .check { color: var(--green); }
+
+  .loading-state {
+    padding: 40px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .error-state {
+    padding: 20px;
+    color: var(--red);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .success-banner {
+    display: none;
+    margin-bottom: 20px;
+    padding: 14px 18px;
+    background: var(--green-dim);
+    border: 1px solid rgba(46,201,126,0.3);
+    border-radius: var(--radius);
+    font-size: 12px;
+    color: var(--green);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <a class="logo-word" href="/app">RiskLayer</a>
+  <div class="header-nav">
+    <a class="btn btn-ghost" href="/app">← Dashboard</a>
+    <button class="btn btn-ghost" id="signOutBtn" onclick="doSignOut()" style="display:none">Sign Out</button>
+  </div>
+</header>
+
+<main>
+  <div class="page-title">Account</div>
+
+  <div class="success-banner" id="successBanner">
+    Your plan has been upgraded. Welcome to Pro!
+  </div>
+
+  <div id="mainContent">
+    <div class="loading-state">Loading account information…</div>
+  </div>
+</main>
+
+<script>
+let clerk = null;
+let checkoutUrl = '';
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/config');
+    if (!r.ok) return null;
+    return r.json();
+  } catch { return null; }
+}
+
+async function loadClerkScript() {
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+    s.crossOrigin = 'anonymous';
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+async function initClerk(publishableKey) {
+  if (!publishableKey || publishableKey.startsWith('pk_test_...')) return false;
+  const loaded = await loadClerkScript();
+  if (!loaded || !window.Clerk) return false;
+  try {
+    clerk = new window.Clerk(publishableKey);
+    await clerk.load();
+    return true;
+  } catch { return false; }
+}
+
+async function fetchPlan(token) {
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const r = await fetch('/me', { headers, credentials: 'include' });
+  if (!r.ok) throw new Error('Failed to fetch plan');
+  return r.json();
+}
+
+function renderAccount(userInfo, planData) {
+  const isPro  = planData.plan === 'pro';
+  const status = planData.status || 'active';
+
+  let periodEnd = '';
+  if (planData.current_period_end) {
+    const d = new Date(planData.current_period_end);
+    periodEnd = d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  const statusLabel = {
+    active:   '<span class="status-active">Active</span>',
+    canceled: '<span class="status-canceled">Canceled</span>',
+    past_due: '<span class="status-past_due">Past due — payment failed</span>',
+  }[status] || status;
+
+  const proSection = isPro ? `
+    <div class="section">
+      <div class="section-header">Subscription</div>
+      <div class="section-body">
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-val">${statusLabel}</span>
+        </div>
+        ${periodEnd ? `
+        <div class="info-row">
+          <span class="info-label">${status === 'canceled' ? 'Access until' : 'Renews'}</span>
+          <span class="info-val">${periodEnd}</span>
+        </div>` : ''}
+        <div style="margin-top:16px">
+          <a class="btn btn-ghost" href="https://app.lemonsqueezy.com" target="_blank" rel="noopener">
+            Manage on Lemon Squeezy ↗
+          </a>
+        </div>
+      </div>
+    </div>` : `
+    <div class="upgrade-box">
+      <h3>Upgrade to Pro</h3>
+      <p>Get access to the full universe of setups, all analysis tabs, and complete flag detail.</p>
+      <ul class="upgrade-features">
+        <li><span class="check">✓</span> Full board — 50+ stocks per session</li>
+        <li><span class="check">✓</span> Top Risks, Clean Setups, and Digest tabs</li>
+        <li><span class="check">✓</span> Complete flag detail</li>
+        <li><span class="check">✓</span> Historical outcome context</li>
+      </ul>
+      <button class="btn btn-primary" onclick="doUpgrade()">Upgrade to Pro — $29/month</button>
+    </div>`;
+
+  return `
+    <div class="section">
+      <div class="section-header">Profile</div>
+      <div class="section-body">
+        ${userInfo?.email ? `
+        <div class="info-row">
+          <span class="info-label">Email</span>
+          <span class="info-val">${userInfo.email}</span>
+        </div>` : ''}
+        <div class="info-row">
+          <span class="info-label">Plan</span>
+          <span class="info-val">
+            <span class="plan-badge ${isPro ? 'badge-pro' : 'badge-free'}">${isPro ? 'Pro' : 'Free'}</span>
+          </span>
+        </div>
+      </div>
+    </div>
+    ${proSection}
+  `;
+}
+
+function renderDemoAccount() {
+  return `
+    <div class="error-state" style="color:var(--text-dim)">
+      <p style="margin-bottom:12px">Not signed in — showing demo state.</p>
+      <a class="btn btn-primary" href="/">Go to Landing Page</a>
+    </div>`;
+}
+
+async function doSignOut() {
+  if (clerk) {
+    await clerk.signOut();
+    window.location.href = '/';
+  }
+}
+
+function doUpgrade() {
+  if (!checkoutUrl) {
+    alert('Checkout URL not configured. Set LEMONSQUEEZY_CHECKOUT_URL in server/.env');
+    return;
+  }
+  let url = checkoutUrl;
+  if (clerk && clerk.user) {
+    url += (url.includes('?') ? '&' : '?') + 'checkout[custom][clerk_user_id]=' + encodeURIComponent(clerk.user.id);
+  }
+  window.location.href = url;
+}
+
+async function init() {
+  // Success banner
+  if (new URLSearchParams(location.search).get('success') === 'true') {
+    document.getElementById('successBanner').style.display = 'block';
+  }
+
+  const config = await loadConfig();
+  if (config) {
+    checkoutUrl = config.checkoutUrl || '';
+    await initClerk(config.clerkPublishableKey);
+  }
+
+  const content = document.getElementById('mainContent');
+
+  if (clerk && clerk.session) {
+    document.getElementById('signOutBtn').style.display = 'inline-block';
+    try {
+      const token = await clerk.session.getToken();
+      const planData = await fetchPlan(token);
+      const userInfo = clerk.user ? { email: clerk.user.primaryEmailAddress?.emailAddress } : null;
+      content.innerHTML = renderAccount(userInfo, planData);
+    } catch (err) {
+      content.innerHTML = `<div class="error-state">Failed to load account info. <a href="/app" style="color:var(--amber)">Back to dashboard</a></div>`;
+    }
+  } else {
+    content.innerHTML = renderDemoAccount();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

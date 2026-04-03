@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RiskLayer — Detect fragile moves before they fail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0b0d;
+    --surface: #111318;
+    --surface2: #181c22;
+    --border: #1e232d;
+    --border2: #252c38;
+    --text: #c8d0dc;
+    --text-dim: #5a6478;
+    --text-mid: #8292a8;
+    --amber: #e8a020;
+    --amber-dim: rgba(232,160,32,0.12);
+    --green: #2ec97e;
+    --green-dim: rgba(46,201,126,0.10);
+    --red: #e05252;
+    --red-dim: rgba(224,82,82,0.10);
+    --blue: #4a90d9;
+    --mono: 'IBM Plex Mono', monospace;
+    --serif: 'Instrument Serif', serif;
+    --radius: 4px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+    z-index: 9999;
+  }
+
+  /* ── HEADER ── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+    height: 58px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .logo-word {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 20px;
+    color: #fff;
+    letter-spacing: -0.5px;
+  }
+
+  .header-actions { display: flex; gap: 10px; align-items: center; }
+
+  .btn {
+    padding: 7px 18px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    font-weight: 500;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    text-decoration: none;
+  }
+
+  .btn-ghost {
+    background: none;
+    border: 1px solid var(--border2);
+    color: var(--text-mid);
+  }
+  .btn-ghost:hover { border-color: var(--text-mid); color: var(--text); }
+
+  .btn-primary {
+    background: var(--amber);
+    border: 1px solid var(--amber);
+    color: #000;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #f0aa28; }
+
+  /* ── HERO ── */
+  .hero {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 100px 32px 80px;
+    text-align: center;
+  }
+
+  .hero-kicker {
+    display: inline-block;
+    padding: 4px 12px;
+    background: var(--amber-dim);
+    border: 1px solid rgba(232,160,32,0.25);
+    border-radius: 2px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 28px;
+  }
+
+  .hero h1 {
+    font-family: var(--serif);
+    font-size: 56px;
+    font-weight: 400;
+    font-style: italic;
+    color: #fff;
+    line-height: 1.1;
+    letter-spacing: -1px;
+    margin-bottom: 22px;
+  }
+
+  .hero-sub {
+    font-size: 14px;
+    color: var(--text-mid);
+    line-height: 1.75;
+    max-width: 600px;
+    margin: 0 auto 40px;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .hero-actions .btn { font-size: 12px; padding: 10px 28px; }
+
+  .hero-note {
+    margin-top: 16px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  /* ── PREVIEW ── */
+  .preview-wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 32px 80px;
+  }
+
+  .preview-frame {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.5);
+  }
+
+  .preview-bar {
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .preview-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .d-red   { background: #e05252; opacity: 0.7; }
+  .d-amber { background: #e8a020; opacity: 0.7; }
+  .d-green { background: #2ec97e; opacity: 0.7; }
+
+  .preview-url {
+    flex: 1;
+    text-align: center;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+  }
+
+  .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .preview-table thead tr { border-bottom: 1px solid var(--border2); }
+
+  .preview-table th {
+    padding: 8px 14px;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    text-align: left;
+    font-weight: 500;
+  }
+
+  .preview-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+
+  .preview-table tbody tr:last-child td { border-bottom: none; }
+
+  .p-ticker { font-weight: 600; color: #fff; font-size: 14px; }
+  .p-verdict { display: inline-block; padding: 3px 8px; border-radius: 2px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; white-space: nowrap; }
+  .pv-trap  { background: rgba(224,82,82,0.22); color: #ff5f5f; border: 1px solid rgba(224,82,82,0.5); }
+  .pv-frag  { background: rgba(232,160,32,0.12); color: #e8a020; border: 1px solid rgba(232,160,32,0.3); }
+  .pv-clean { background: rgba(46,201,126,0.10); color: #2ec97e; border: 1px solid rgba(46,201,126,0.2); }
+  .pv-watch { background: rgba(74,144,217,0.10); color: #4a90d9; border: 1px solid rgba(74,144,217,0.2); }
+  .p-risk-hi { color: #e05252; font-weight: 600; font-size: 14px; }
+  .p-risk-ok { color: #e8a020; font-weight: 600; font-size: 14px; }
+  .p-risk-lo { color: #2ec97e; font-weight: 600; font-size: 14px; }
+  .p-chip { display: inline-block; padding: 2px 6px; border-radius: 2px; font-size: 9px; margin: 1px 2px 1px 0; }
+  .p-chip-warn { background: rgba(232,160,32,0.12); border: 1px solid rgba(232,160,32,0.3); color: #d4921c; }
+  .p-chip-good { background: rgba(46,201,126,0.10); border: 1px solid rgba(46,201,126,0.2); color: #2ec97e; }
+  .row-hi { border-left: 3px solid rgba(224,82,82,0.7); background: rgba(224,82,82,0.03); }
+
+  /* ── FEATURES ── */
+  .features {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 60px 32px 80px;
+  }
+
+  .section-label {
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 40px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  @media (max-width: 800px) { .features-grid { grid-template-columns: 1fr; } }
+
+  .feature-card {
+    padding: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .feature-icon {
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+
+  .feature-title {
+    font-size: 13px;
+    color: #fff;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+
+  .feature-desc {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+
+  /* ── PRICING ── */
+  .pricing {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 20px 32px 100px;
+  }
+
+  .pricing-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  @media (max-width: 640px) { .pricing-grid { grid-template-columns: 1fr; } }
+
+  .pricing-card {
+    padding: 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .pricing-card.featured {
+    border-color: var(--amber);
+    background: linear-gradient(135deg, var(--surface) 0%, rgba(232,160,32,0.04) 100%);
+  }
+
+  .plan-name {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .plan-price {
+    font-size: 36px;
+    font-weight: 600;
+    color: #fff;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .plan-price-note {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 24px;
+  }
+
+  .plan-features { list-style: none; margin-bottom: 28px; }
+
+  .plan-features li {
+    font-size: 12px;
+    color: var(--text-mid);
+    padding: 5px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .plan-features li:last-child { border-bottom: none; }
+
+  .plan-features li .check { color: var(--green); flex-shrink: 0; font-size: 11px; }
+  .plan-features li .cross { color: var(--text-dim); flex-shrink: 0; font-size: 11px; }
+
+  .plan-cta { width: 100%; }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 24px 32px;
+    text-align: center;
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.8;
+  }
+
+  /* ── UPGRADE MODAL ── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 500;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal-box {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 32px;
+    max-width: 380px;
+    width: 90%;
+    text-align: center;
+  }
+
+  .modal-box h3 {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 22px;
+    color: #fff;
+    margin-bottom: 10px;
+  }
+
+  .modal-box p { font-size: 12px; color: var(--text-mid); margin-bottom: 24px; line-height: 1.7; }
+
+  .modal-actions { display: flex; gap: 10px; flex-direction: column; }
+
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border2);
+    border-top-color: var(--amber);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin: 0 auto 16px;
+    display: none;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <span class="logo-word">RiskLayer</span>
+  <div class="header-actions">
+    <button class="btn btn-ghost" onclick="doSignIn()">Sign In</button>
+    <button class="btn btn-primary" onclick="doSignUp()">Start Free</button>
+  </div>
+</header>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-kicker">US Equities · Daily Post-Close</div>
+  <h1>Detect fragile moves<br>before they fail.</h1>
+  <p class="hero-sub">
+    High-attention stock moves often look strong but collapse. RiskLayer classifies
+    each setup by failure risk — trap, fragile, watch, or clean — using structural
+    pattern analysis, not sentiment.
+  </p>
+  <div class="hero-actions">
+    <button class="btn btn-primary" onclick="doSignUp()">Start Free — No card required</button>
+    <button class="btn btn-ghost" onclick="doSignIn()">Sign In</button>
+  </div>
+  <div class="hero-note">Free plan includes the top 8 setups per session.</div>
+</section>
+
+<!-- Dashboard preview -->
+<div class="preview-wrap">
+  <div class="preview-frame">
+    <div class="preview-bar">
+      <div class="preview-dot d-red"></div>
+      <div class="preview-dot d-amber"></div>
+      <div class="preview-dot d-green"></div>
+      <div class="preview-url">risklayer.io/app</div>
+    </div>
+    <table class="preview-table">
+      <thead>
+        <tr>
+          <th>#</th><th>Ticker</th><th>Verdict</th><th>Classification</th>
+          <th style="text-align:right">Draw 5D</th><th style="text-align:right">Risk</th><th>Flags</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="row-hi">
+          <td style="color:var(--text-dim)">1</td>
+          <td class="p-ticker">RIVN</td>
+          <td><span class="p-verdict pv-trap">Likely Trap</span></td>
+          <td style="font-size:11px;color:var(--text-mid)">Speculative spike</td>
+          <td class="p-risk-hi" style="text-align:right">58%</td>
+          <td class="p-risk-hi" style="text-align:right">0.71</td>
+          <td>
+            <span class="p-chip p-chip-warn">Volume elevated</span>
+            <span class="p-chip p-chip-warn">Weak sector</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="color:var(--text-dim)">2</td>
+          <td class="p-ticker">TSLA</td>
+          <td><span class="p-verdict pv-frag">Fragile</span></td>
+          <td style="font-size:11px;color:var(--text-mid)">Breakout w/ exhaustion risk</td>
+          <td class="p-risk-ok" style="text-align:right">49%</td>
+          <td class="p-risk-ok" style="text-align:right">0.62</td>
+          <td>
+            <span class="p-chip p-chip-warn">Price extended</span>
+            <span class="p-chip p-chip-warn">Volatility expanding</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="color:var(--text-dim)">3</td>
+          <td class="p-ticker">NVDA</td>
+          <td><span class="p-verdict pv-clean">Clean</span></td>
+          <td style="font-size:11px;color:var(--text-mid)">Favorable setup</td>
+          <td class="p-risk-lo" style="text-align:right">21%</td>
+          <td class="p-risk-lo" style="text-align:right">0.22</td>
+          <td>
+            <span class="p-chip p-chip-good">Sector aligned</span>
+            <span class="p-chip p-chip-good">ADX strengthening</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="color:var(--text-dim)">4</td>
+          <td class="p-ticker">META</td>
+          <td><span class="p-verdict pv-watch">Watch</span></td>
+          <td style="font-size:11px;color:var(--text-mid)">High attention, low trust</td>
+          <td class="p-risk-ok" style="text-align:right">47%</td>
+          <td class="p-risk-ok" style="text-align:right">0.55</td>
+          <td>
+            <span class="p-chip p-chip-warn">Follow-through weak</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Features -->
+<section class="features">
+  <div class="section-label">What you get</div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">⚡</div>
+      <div class="feature-title">Verdict-first layout</div>
+      <div class="feature-desc">Every move is classified as Likely Trap, Fragile, Watch, or Clean — before you look at any numbers. Stop scanning, start deciding.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">◈</div>
+      <div class="feature-title">Risk-first scoring</div>
+      <div class="feature-desc">Drawdown odds and mean-reversion risk are the primary columns. Setup quality and continuation are secondary. The dangerous number is always visible first.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">◻</div>
+      <div class="feature-title">Daily post-close digest</div>
+      <div class="feature-desc">After each session, get a structured summary: the day's highest-risk setups, cleanest structures, and realized outcomes from prior predictions.</div>
+    </div>
+  </div>
+</section>
+
+<!-- Pricing -->
+<section class="pricing">
+  <div class="section-label">Pricing</div>
+  <div class="pricing-grid">
+    <div class="pricing-card">
+      <div class="plan-name">Free</div>
+      <div class="plan-price">$0</div>
+      <div class="plan-price-note">forever, no card required</div>
+      <ul class="plan-features">
+        <li><span class="check">✓</span> Top 8 setups per session</li>
+        <li><span class="check">✓</span> Verdict + risk scores</li>
+        <li><span class="check">✓</span> Basic flag detail</li>
+        <li><span class="check">✓</span> Board view</li>
+        <li><span class="cross">—</span> <span style="color:var(--text-dim)">Top Risks tab</span></li>
+        <li><span class="cross">—</span> <span style="color:var(--text-dim)">Clean Setups tab</span></li>
+        <li><span class="cross">—</span> <span style="color:var(--text-dim)">Daily Digest tab</span></li>
+        <li><span class="cross">—</span> <span style="color:var(--text-dim)">Full universe (50+ stocks)</span></li>
+      </ul>
+      <button class="btn btn-ghost plan-cta" onclick="doSignUp()">Get Started Free</button>
+    </div>
+    <div class="pricing-card featured">
+      <div class="plan-name" style="color:var(--amber)">Pro</div>
+      <div class="plan-price">$29</div>
+      <div class="plan-price-note">per month</div>
+      <ul class="plan-features">
+        <li><span class="check">✓</span> Full universe — 50+ stocks/session</li>
+        <li><span class="check">✓</span> Verdict + risk scores</li>
+        <li><span class="check">✓</span> Full flag detail</li>
+        <li><span class="check">✓</span> Board view</li>
+        <li><span class="check">✓</span> <strong style="color:#fff">Top Risks tab</strong></li>
+        <li><span class="check">✓</span> <strong style="color:#fff">Clean Setups tab</strong></li>
+        <li><span class="check">✓</span> <strong style="color:#fff">Daily Digest tab</strong></li>
+        <li><span class="check">✓</span> Historical outcome context</li>
+      </ul>
+      <button class="btn btn-primary plan-cta" onclick="doUpgrade()">Upgrade to Pro</button>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Not financial advice. Model outputs are statistical estimates based on historical pattern behavior.<br>
+  Past classification accuracy does not guarantee future results. Use alongside your own research.
+</footer>
+
+<!-- Auth state modal (shown while Clerk loads) -->
+<div class="modal-overlay" id="authModal">
+  <div class="modal-box">
+    <div class="spinner" id="authSpinner"></div>
+    <h3 id="authModalTitle">Signing in…</h3>
+    <p id="authModalMsg">Connecting to your account.</p>
+    <div class="modal-actions" id="authModalActions" style="display:none">
+      <button class="btn btn-ghost" onclick="closeAuthModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────
+// Config + Clerk bootstrap
+// ─────────────────────────────────────────────────────────────────
+let clerk = null;
+let checkoutUrl = '';
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/config');
+    if (!r.ok) return null;
+    return r.json();
+  } catch { return null; }
+}
+
+async function loadClerkScript() {
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+    s.crossOrigin = 'anonymous';
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+async function initClerk(publishableKey) {
+  if (!publishableKey || publishableKey.startsWith('pk_test_...')) return false;
+  const loaded = await loadClerkScript();
+  if (!loaded || !window.Clerk) return false;
+  try {
+    clerk = new window.Clerk(publishableKey);
+    await clerk.load();
+    return true;
+  } catch { return false; }
+}
+
+async function init() {
+  const config = await loadConfig();
+  if (config) {
+    checkoutUrl = config.checkoutUrl || '';
+    await initClerk(config.clerkPublishableKey);
+  }
+
+  // If already signed in, redirect to app
+  if (clerk && clerk.session) {
+    window.location.href = '/app';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Auth actions
+// ─────────────────────────────────────────────────────────────────
+function doSignIn() {
+  if (clerk) {
+    clerk.redirectToSignIn({ redirectUrl: '/app' });
+  } else {
+    // Fallback: go directly to /app (demo mode)
+    window.location.href = '/app';
+  }
+}
+
+function doSignUp() {
+  if (clerk) {
+    clerk.redirectToSignUp({ redirectUrl: '/app' });
+  } else {
+    window.location.href = '/app';
+  }
+}
+
+function doUpgrade() {
+  if (!checkoutUrl) {
+    alert('Checkout URL not configured. Set LEMONSQUEEZY_CHECKOUT_URL in server/.env');
+    return;
+  }
+  // If signed in, append clerk_user_id to checkout custom data
+  let url = checkoutUrl;
+  if (clerk && clerk.user) {
+    url += (url.includes('?') ? '&' : '?') + 'checkout[custom][clerk_user_id]=' + encodeURIComponent(clerk.user.id);
+  }
+  window.location.href = url;
+}
+
+function closeAuthModal() {
+  document.getElementById('authModal').classList.remove('open');
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
