@@ -1,0 +1,32 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# ── Virtual environment ───────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Model artifacts ───────────────────────────────────────────────
+# Trained model binaries and walk-forward results — regenerate with run_train_all.py
+app/models/artifacts/
+
+# ── Logs ──────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Environment / secrets ─────────────────────────────────────────
+.env
+server/.env
+
+# ── Node ──────────────────────────────────────────────────────────
+node_modules/
+server/node_modules/
+
+# ── macOS ─────────────────────────────────────────────────────────
+.DS_Store
