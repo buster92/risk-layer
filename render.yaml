@@ -40,4 +40,4 @@ services:
       - key: LEMONSQUEEZY_CHECKOUT_URL
         sync: false  # your Lemon Squeezy checkout URL
       - key: ALLOWED_ORIGIN
-        value: https://risk-layer-server.onrender.com
+        value: https://risk-layer.onrender.com
