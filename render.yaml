@@ -19,3 +19,25 @@ services:
         value: app/models/artifacts
       - key: ALLOW_ORIGINS
         value: '["https://risk-layer.onrender.com"]'
+
+  - type: web
+    name: movecred-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false  # set manually — same Supabase connection string
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false  # from Clerk dashboard
+      - key: CLERK_SECRET_KEY
+        sync: false  # from Clerk dashboard
+      - key: LEMONSQUEEZY_WEBHOOK_SECRET
+        sync: false  # from Lemon Squeezy dashboard
+      - key: LEMONSQUEEZY_CHECKOUT_URL
+        sync: false  # your Lemon Squeezy checkout URL
+      - key: ALLOWED_ORIGIN
+        value: https://movecred-server.onrender.com
