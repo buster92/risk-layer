@@ -60,6 +60,8 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit DATABASE_URL and MARKET_DATA_PROVIDER
 ```
+// This can also help initializing the database schema
+uvicorn app.api.main:app --reload
 
 ### 3. Run PostgreSQL (Docker)
 
@@ -77,7 +79,7 @@ docker run -d \
 
 ```bash
 # Ingests OHLCV + builds point-in-time daily universes from 2019 onward
-python scripts/run_backfill.py --start 2019-01-01
+python3 scripts/run_backfill.py --start 2019-01-01
 ```
 
 > **Warning:** This step may take 30–60 minutes depending on your data provider and internet connection.
