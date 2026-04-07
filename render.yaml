@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: movecred-api
+    name: risk-layer-api
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
@@ -21,7 +21,7 @@ services:
         value: '["https://risk-layer.onrender.com"]'
 
   - type: web
-    name: movecred-server
+    name: risk-layer-server
     runtime: node
     rootDir: server
     buildCommand: npm install
@@ -40,4 +40,4 @@ services:
       - key: LEMONSQUEEZY_CHECKOUT_URL
         sync: false  # your Lemon Squeezy checkout URL
       - key: ALLOWED_ORIGIN
-        value: https://movecred-server.onrender.com
+        value: https://risk-layer-server.onrender.com
