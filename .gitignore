@@ -13,8 +13,8 @@ venv/
 env/
 
 # ── Model artifacts ───────────────────────────────────────────────
-# Trained model binaries and walk-forward results — regenerate with run_train_all.py
-app/models/artifacts/
+# Track .pkl and metrics so Render has them at deploy time
+# app/models/artifacts/  ← intentionally unignored
 
 # ── Logs ──────────────────────────────────────────────────────────
 logs/

@@ -3,6 +3,7 @@ app/core/config.py
 Central configuration loaded from environment variables.
 """
 from functools import lru_cache
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +20,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://movecred:movecred@localhost:5432/movecred"
     db_pool_size: int = 5
     db_max_overflow: int = 10
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def fix_postgres_scheme(cls, v: str) -> str:
+        # Render (and Heroku) issue postgres:// URLs; SQLAlchemy needs postgresql+psycopg2://
+        if isinstance(v, str) and v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+psycopg2://", 1)
+        return v
 
     # ── Market data provider ───────────────────────────────────────────────────
     # "yfinance" for prototype; swap to "polygon", "iex", "finnhub" in production
