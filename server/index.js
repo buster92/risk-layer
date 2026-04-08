@@ -9,8 +9,11 @@ const { Pool } = require('pg');
 const { ClerkExpressRequireAuth, clerkClient } = require('@clerk/clerk-sdk-node');
 
 const app  = express();
+// Strip sslmode from connection string — Supabase appends ?sslmode=require which
+// pg-connection-string v3 now treats as verify-full, blocking self-signed certs.
+const dbUrl = (process.env.DATABASE_URL || '').replace(/[?&]sslmode=[^&]*/g, '');
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: dbUrl,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
