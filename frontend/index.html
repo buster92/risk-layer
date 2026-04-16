@@ -6,7 +6,8 @@
 <title>RiskLayer — Detect fragile moves before they fail</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js" crossorigin="anonymous" defer></script>
+<!-- Clerk script is loaded dynamically in loadClerkAndPlan() after /config returns the publishable key -->
+
 <style>
   :root {
     --bg: #0a0b0d;
@@ -1022,12 +1023,6 @@
 </head>
 <body>
 
-<!-- Mock data banner -->
-<div class="mock-banner" id="mockBanner">
-  <span>⚡ Demo mode — showing mock data. Connect your API to see live predictions.</span>
-  <button class="mock-toggle" onclick="toggleMockMode()">Use Live API</button>
-</div>
-
 <!-- Header -->
 <header>
   <div class="logo">
@@ -1041,11 +1036,10 @@
     <span id="sessionDate" style="color:var(--text-mid)"></span>
     <span class="session-badge">AFTER CLOSE</span>
     <div class="api-status">
-      <div class="status-dot demo" id="statusDot"></div>
-      <span id="statusText">Demo</span>
+      <div class="status-dot live" id="statusDot"></div>
+      <span id="statusText">Live</span>
     </div>
     <span id="planBadge" style="display:none"></span>
-    <a href="/account" id="upgradeHeaderBtn" style="display:none;padding:5px 12px;background:var(--amber);border:none;border-radius:var(--radius);color:#000;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;cursor:pointer;text-decoration:none">Upgrade</a>
     <a href="/account" id="accountLink" style="display:none;font-size:10px;color:var(--text-dim);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--text-mid)'" onmouseout="this.style.color='var(--text-dim)'">Account</a>
   </div>
 </header>
@@ -1101,7 +1095,7 @@
         <span class="outcome-stat-val" style="color:var(--green)" id="ocCleanRate">—</span>
         <span class="outcome-stat-desc">clean hold rate</span>
       </div>
-      <div style="margin-left:auto;font-size:10px;color:var(--text-dim);font-style:italic" id="ocNote">Live stats load from /weekly-eval</div>
+      <div style="margin-left:auto;font-size:10px;color:var(--text-dim);font-style:italic" id="ocNote">Loading live stats…</div>
     </div>
     <div id="boardLoadingBar" class="loading-bar" style="display:none"></div>
     <table class="board-table" id="boardTable">
@@ -1238,7 +1232,7 @@
 let API_BASE = (window.location.hostname === 'localhost')
   ? 'http://localhost:8000/v1'
   : 'https://risk-layer.onrender.com/v1';
-let USE_MOCK = true;
+// Mock mode permanently disabled — dashboard always pulls live data from the FastAPI service.
 let currentSort = 'active';
 
 // ── SaaS plan state ───────────────────────────────────────────────
@@ -1248,62 +1242,6 @@ let CHECKOUT_URL = '';
 
 const PRO_TABS = ['risks', 'continuations', 'digest'];
 const FREE_BOARD_LIMIT = 8;
-
-// ─────────────────────────────────────────────────────────────────
-// Mock data
-// ─────────────────────────────────────────────────────────────────
-const MOCK_STOCKS = [
-  { rank:1, ticker:'NVDA', company_name:'NVIDIA Corporation', sector:'Technology',
-    classification:'Favorable setup', interpretation:'Structure is relatively clean: trend context supports the move, sector is not opposing, and adverse excursion risk is below average.',
-    confidence_bucket:'high', p_continue_3d:0.68, p_continue_5d:0.61, p_drawdown_5d:0.21, p_mean_revert_3d:0.18,
-    risk_score:0.22, deception_score:0.22, setup_quality_score:0.71,
-    flags:['Trend strength improving','Relative volume supportive','Sector aligned'] },
-  { rank:2, ticker:'TSLA', company_name:'Tesla Inc.', sector:'Consumer Discretionary',
-    classification:'Breakout with exhaustion risk', interpretation:'This move is attracting heavy attention, but similar setups usually fail to build stable follow-through.',
-    confidence_bucket:'medium', p_continue_3d:0.31, p_continue_5d:0.28, p_drawdown_5d:0.49, p_mean_revert_3d:0.44,
-    risk_score:0.62, deception_score:0.62, setup_quality_score:0.28,
-    flags:['Relative volume elevated','Volatility expanding','Price extended from trend','Weak sector confirmation'] },
-  { rank:3, ticker:'AMD', company_name:'Advanced Micro Devices', sector:'Technology',
-    classification:'Favorable setup', interpretation:'Structure is relatively clean: trend context supports the move, sector is not opposing, and adverse excursion risk is below average.',
-    confidence_bucket:'high', p_continue_3d:0.61, p_continue_5d:0.55, p_drawdown_5d:0.28, p_mean_revert_3d:0.22,
-    risk_score:0.32, deception_score:0.32, setup_quality_score:0.62,
-    flags:['ADX strengthening','Sector aligned','Relative volume supportive'] },
-  { rank:4, ticker:'META', company_name:'Meta Platforms Inc.', sector:'Communication Services',
-    classification:'High attention, low trust', interpretation:'High volume is attracting attention, but similar setups usually fail to sustain momentum.',
-    confidence_bucket:'medium', p_continue_3d:0.38, p_continue_5d:0.34, p_drawdown_5d:0.47, p_mean_revert_3d:0.40,
-    risk_score:0.55, deception_score:0.55, setup_quality_score:0.34,
-    flags:['Relative volume elevated','Volatility expanding','Follow-through historically weak'] },
-  { rank:5, ticker:'RIVN', company_name:'Rivian Automotive', sector:'Consumer Discretionary',
-    classification:'Speculative spike', interpretation:'This resembles a retail-style spike more than durable trend confirmation. Sector context does not support the move.',
-    confidence_bucket:'medium', p_continue_3d:0.29, p_continue_5d:0.25, p_drawdown_5d:0.58, p_mean_revert_3d:0.52,
-    risk_score:0.71, deception_score:0.71, setup_quality_score:0.22,
-    flags:['Relative volume elevated','Weak sector confirmation','Gap-driven move','Post-event instability'] },
-  { rank:6, ticker:'MSFT', company_name:'Microsoft Corporation', sector:'Technology',
-    classification:'Favorable setup', interpretation:'Structure is relatively clean: trend context supports the move, sector is not opposing, and adverse excursion risk is below average.',
-    confidence_bucket:'high', p_continue_3d:0.66, p_continue_5d:0.60, p_drawdown_5d:0.19, p_mean_revert_3d:0.16,
-    risk_score:0.20, deception_score:0.20, setup_quality_score:0.73,
-    flags:['ADX strengthening','Sector aligned','Relative volume supportive'] },
-  { rank:7, ticker:'MARA', company_name:'Marathon Digital Holdings', sector:'Financials',
-    classification:'Panic flush with unstable structure', interpretation:'A sharp decline with elevated volume often creates instability. Structure is fragile.',
-    confidence_bucket:'medium', p_continue_3d:0.35, p_continue_5d:0.30, p_drawdown_5d:0.55, p_mean_revert_3d:0.48,
-    risk_score:0.68, deception_score:0.68, setup_quality_score:0.25,
-    flags:['Volatility expanding','Relative volume elevated','Weak sector confirmation'] },
-  { rank:8, ticker:'AMZN', company_name:'Amazon.com Inc.', sector:'Consumer Discretionary',
-    classification:'Weak continuation setup', interpretation:'The setup shows unfavorable continuation odds. Adverse move probability is elevated relative to normal.',
-    confidence_bucket:'low', p_continue_3d:0.37, p_continue_5d:0.33, p_drawdown_5d:0.50, p_mean_revert_3d:0.43,
-    risk_score:0.58, deception_score:0.58, setup_quality_score:0.30,
-    flags:['Price extended from trend','Follow-through historically weak','Volatility expanding'] },
-  { rank:9, ticker:'AAPL', company_name:'Apple Inc.', sector:'Technology',
-    classification:'Neutral / insufficient signal', interpretation:'No dominant pattern detected. Continuation odds are near baseline.',
-    confidence_bucket:'low', p_continue_3d:0.50, p_continue_5d:0.49, p_drawdown_5d:0.32, p_mean_revert_3d:0.28,
-    risk_score:0.36, deception_score:0.36, setup_quality_score:0.47,
-    flags:['ADX strengthening'] },
-  { rank:10, ticker:'PLTR', company_name:'Palantir Technologies', sector:'Technology',
-    classification:'Breakout with exhaustion risk', interpretation:'Extension and volume spike are aligned. History shows limited follow-through in similar setups.',
-    confidence_bucket:'medium', p_continue_3d:0.33, p_continue_5d:0.29, p_drawdown_5d:0.52, p_mean_revert_3d:0.47,
-    risk_score:0.64, deception_score:0.64, setup_quality_score:0.26,
-    flags:['Relative volume elevated','Volatility expanding','Price extended from trend','Gap-driven move'] },
-];
 
 // ─────────────────────────────────────────────────────────────────
 // Verdict derivation
@@ -1482,9 +1420,7 @@ async function openPanel(ticker) {
 
   let data = stockCache[ticker];
   if (!data) {
-    data = USE_MOCK
-      ? MOCK_STOCKS.find(s => s.ticker === ticker) || null
-      : await apiGet(`/stocks/${ticker}/analysis`);
+    data = await apiGet(`/stocks/${ticker}/analysis`);
     if (data) stockCache[ticker] = data;
   }
 
@@ -1504,15 +1440,8 @@ async function openPanel(ticker) {
 
   const v = getVerdict(data);
 
-  // Build mock history
-  const histRows = USE_MOCK
-    ? Array.from({length:5},(_,i) => {
-        const d = new Date(); d.setDate(d.getDate() - (5-i));
-        return { date: d.toISOString().slice(0,10), classification: data.classification,
-          p_continue_3d: data.p_continue_3d ? data.p_continue_3d - i*0.02 : null,
-          p_drawdown_5d: data.p_drawdown_5d, risk_score: data.risk_score, flags: [] };
-      })
-    : [];
+  // History rows come from the live /stocks/{ticker}/analysis response if present, otherwise empty.
+  const histRows = data.history || [];
 
   // Sorted flags — warn first, then neutral, then good
   const allFlags = data.flags || [];
@@ -1628,15 +1557,8 @@ async function apiGet(path) {
 // ─────────────────────────────────────────────────────────────────
 // Load views
 // ─────────────────────────────────────────────────────────────────
-function sortedMock(mode) {
-  const stocks = [...MOCK_STOCKS];
-  if (mode === 'deceptive') stocks.sort((a,b) => (b.deception_score||0)-(a.deception_score||0));
-  else if (mode === 'lowest_risk') stocks.sort((a,b) => (a.risk_score||1)-(b.risk_score||1));
-  return stocks.map((s,i) => ({...s, rank: i+1}));
-}
-
 function populateOutcomeContext(liftData) {
-  // liftData: result from /weekly-eval lift_metrics.by_class, or null for mock
+  // liftData: by_class map from /admin/eval/lift, or null when no realized outcomes yet
   if (liftData) {
     const trapClass = Object.entries(liftData).find(([k]) => k.includes('Trap') || k.includes('trap') || k.includes('Speculative') || k.includes('Panic'));
     const cleanClass = Object.entries(liftData).find(([k]) => k.includes('Favorable'));
@@ -1645,12 +1567,8 @@ function populateOutcomeContext(liftData) {
     if (cleanClass) { document.getElementById('ocCleanRate').textContent = Math.round(cleanClass[1].hit_rate * 100) + '%'; }
     if (fragClass)  { document.getElementById('ocFragileRate').textContent = Math.round((1 - fragClass[1].hit_rate) * 100) + '%'; }
     document.getElementById('ocNote').textContent = 'Live · last 90d';
-  } else if (USE_MOCK) {
-    document.getElementById('ocFailRate').textContent  = '~67%';
-    document.getElementById('ocAvgReturn').textContent = '−6.4%';
-    document.getElementById('ocFragileRate').textContent = '~48%';
-    document.getElementById('ocCleanRate').textContent = '~71%';
-    document.getElementById('ocNote').textContent      = 'Demo values';
+  } else {
+    document.getElementById('ocNote').textContent = 'Awaiting realized outcomes';
   }
 }
 
@@ -1658,19 +1576,12 @@ async function loadBoard() {
   const bar = document.getElementById('boardLoadingBar');
   bar.style.display = 'block';
 
-  let stocks;
-  if (USE_MOCK) {
-    await delay(400);
-    stocks = sortedMock(currentSort);
-    populateOutcomeContext(null);
-  } else {
-    const [boardData, evalData] = await Promise.all([
-      apiGet(`/market/active?sort_by=${currentSort}&limit=50`),
-      apiGet('/admin/weekly-eval'),
-    ]);
-    stocks = boardData?.stocks || [];
-    populateOutcomeContext(evalData?.lift_metrics?.by_class || null);
-  }
+  const [boardData, evalData] = await Promise.all([
+    apiGet(`/market/active?sort_by=${currentSort}&limit=50`),
+    apiGet('/admin/eval/lift?lookback_days=90'),
+  ]);
+  const stocks = boardData?.stocks || [];
+  populateOutcomeContext(evalData?.by_class || null);
 
   bar.style.display = 'none';
   document.getElementById('boardCount').textContent = stocks.length;
@@ -1707,14 +1618,8 @@ async function loadRisks() {
   const bar = document.getElementById('risksLoadingBar');
   bar.style.display = 'block';
 
-  let stocks;
-  if (USE_MOCK) {
-    await delay(350);
-    stocks = sortedMock('deceptive').slice(0, 10);
-  } else {
-    const data = await apiGet('/market/top-risks?limit=10');
-    stocks = data?.stocks || [];
-  }
+  const data = await apiGet('/market/top-risks?limit=10');
+  const stocks = data?.stocks || [];
 
   bar.style.display = 'none';
   document.getElementById('risksCount').textContent = stocks.length;
@@ -1728,14 +1633,8 @@ async function loadContinuations() {
   const bar = document.getElementById('contsLoadingBar');
   bar.style.display = 'block';
 
-  let stocks;
-  if (USE_MOCK) {
-    await delay(350);
-    stocks = sortedMock('lowest_risk').slice(0, 10);
-  } else {
-    const data = await apiGet('/market/top-favorable?limit=10');
-    stocks = data?.stocks || [];
-  }
+  const data = await apiGet('/market/top-favorable?limit=10');
+  const stocks = data?.stocks || [];
 
   bar.style.display = 'none';
   document.getElementById('contsCount').textContent = stocks.length;
@@ -1749,16 +1648,7 @@ async function loadDigest() {
   const bar = document.getElementById('digestLoadingBar');
   bar.style.display = 'block';
 
-  let digest;
-  if (USE_MOCK) {
-    await delay(400);
-    const risks = sortedMock('deceptive').slice(0,5);
-    const conts = sortedMock('lowest_risk').slice(0,5);
-    digest = { date: new Date().toISOString().slice(0,10), top_deceptive_moves: risks,
-      strongest_continuation_profiles: conts, prior_session_outcomes: [], summary: 'Demo digest' };
-  } else {
-    digest = await apiGet('/digest/daily');
-  }
+  const digest = await apiGet('/digest/daily');
 
   bar.style.display = 'none';
   if (!digest) return;
@@ -1836,50 +1726,6 @@ function setSort(mode, btn) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Mock mode toggle
-// ─────────────────────────────────────────────────────────────────
-async function toggleMockMode() {
-  USE_MOCK = !USE_MOCK;
-  stockCache = {};
-
-  const banner = document.getElementById('mockBanner');
-  const dot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-  const btn = banner.querySelector('.mock-toggle');
-
-  if (!USE_MOCK) {
-    // Test connectivity
-    const health = await fetch(API_BASE.replace('/v1', '') + '/health').catch(() => null);
-    if (!health || !health.ok) {
-      USE_MOCK = true;
-      dot.className = 'status-dot error';
-      statusText.textContent = 'API unreachable';
-      btn.textContent = 'Use Demo Mode';
-      setTimeout(() => {
-        USE_MOCK = true;
-        dot.className = 'status-dot demo';
-        statusText.textContent = 'Demo';
-        btn.textContent = 'Use Live API';
-        banner.style.display = 'flex';
-      }, 2500);
-      return;
-    }
-    banner.style.display = 'none';
-    dot.className = 'status-dot live';
-    statusText.textContent = 'Live';
-  } else {
-    banner.style.display = 'flex';
-    btn.textContent = 'Use Live API';
-    dot.className = 'status-dot demo';
-    statusText.textContent = 'Demo';
-  }
-
-  // Reload current view
-  const activeView = document.querySelector('.view.active')?.id?.replace('view-', '');
-  if (activeView && loaders[activeView]) loaders[activeView]();
-}
-
-// ─────────────────────────────────────────────────────────────────
 // Utilities
 // ─────────────────────────────────────────────────────────────────
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1893,11 +1739,31 @@ function emptyRow(cols) {
 // ─────────────────────────────────────────────────────────────────
 // Upgrade / plan gating helpers
 // ─────────────────────────────────────────────────────────────────
+// Single Upgrade-to-Pro flow used by every "Upgrade" button on the dashboard.
+// • Not signed in + Clerk available → open Clerk sign-up modal; redirect back to /app?upgrade=1 so checkout fires automatically after auth.
+// • Signed in → go straight to Lemon Squeezy checkout with clerk_user_id attached.
+// • Clerk not configured at all → fall back to raw checkout URL (purchase will be matched by email via webhook).
 function clickUpgrade() {
+  // No Clerk session yet — prompt sign-up. After auth, the init() handler picks up ?upgrade=1 and finishes the checkout.
+  if (CLERK_INSTANCE && !CLERK_INSTANCE.user) {
+    try {
+      CLERK_INSTANCE.openSignUp({
+        afterSignUpUrl:  '/app?upgrade=1',
+        afterSignInUrl:  '/app?upgrade=1',
+        redirectUrl:     '/app?upgrade=1',
+      });
+      return;
+    } catch (e) {
+      // If openSignUp isn't available for some reason, fall through to direct checkout.
+      console.warn('[upgrade] Clerk modal unavailable, falling back to checkout', e);
+    }
+  }
+
   if (!CHECKOUT_URL) {
-    window.location.href = '/account';
+    alert('Checkout is not yet configured. Please try again later.');
     return;
   }
+
   let url = CHECKOUT_URL;
   if (CLERK_INSTANCE && CLERK_INSTANCE.user) {
     url += (url.includes('?') ? '&' : '?') +
@@ -1923,8 +1789,7 @@ function applyPlanGating() {
     ? '<span class="plan-badge plan-badge-free">Free</span>'
     : '<span class="plan-badge plan-badge-pro">Pro</span>';
 
-  // Header upgrade button & account link
-  document.getElementById('upgradeHeaderBtn').style.display = isFree ? 'inline-block' : 'none';
+  // Header account link (the single Upgrade-to-Pro CTA lives in the upgrade banner; no header button)
   document.getElementById('accountLink').style.display = isFree ? 'none' : 'inline-block';
 
   // Tab lock icons
@@ -1934,14 +1799,34 @@ function applyPlanGating() {
   });
 }
 
+// Where the Node auth/billing server lives. Same-origin in dev (when served by the Node server itself),
+// override with window.AUTH_ORIGIN in production if the UI is hosted on a different domain.
+const AUTH_ORIGIN = (typeof window !== 'undefined' && window.AUTH_ORIGIN) || '';
+const authUrl = (path) => AUTH_ORIGIN ? AUTH_ORIGIN.replace(/\/$/, '') + path : path;
+
 async function loadConfig() {
   try {
-    const r = await fetch('/config');
+    const r = await fetch(authUrl('/config'), { credentials: 'include' });
     if (!r.ok) return null;
     return r.json();
   } catch { return null; }
 }
 
+function loadClerkScript() {
+  return new Promise((resolve) => {
+    if (window.Clerk) return resolve(true);
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+    s.crossOrigin = 'anonymous';
+    s.onload  = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+// Loads Clerk (if a publishable key is configured) and fetches the user's plan.
+// Logged-out visitors are NOT redirected — they get the free/limited dashboard view and can
+// trigger sign-up by clicking any "Upgrade to Pro" button (see clickUpgrade).
 async function loadClerkAndPlan() {
   const config = await loadConfig();
   if (!config) return;
@@ -1951,29 +1836,23 @@ async function loadClerkAndPlan() {
   const key = config.clerkPublishableKey;
   if (!key || key.startsWith('pk_test_...')) return;
 
-  // Clerk script already loaded via <script defer> in <head>
-  // Wait for window.Clerk to be available
-  let attempts = 0;
-  while (!window.Clerk && attempts < 20) {
-    await delay(100);
-    attempts++;
-  }
-  if (!window.Clerk) return;
+  const loaded = await loadClerkScript();
+  if (!loaded || !window.Clerk) return;
 
   try {
     CLERK_INSTANCE = new window.Clerk(key);
     await CLERK_INSTANCE.load();
-  } catch { return; }
-
-  if (!CLERK_INSTANCE.session) {
-    // Not signed in — redirect to landing
-    window.location.href = '/';
+  } catch (e) {
+    console.warn('[clerk] init failed', e);
     return;
   }
 
+  // No session → stay on the page in limited (free) view.
+  if (!CLERK_INSTANCE.session) return;
+
   try {
     const token = await CLERK_INSTANCE.session.getToken();
-    const r = await fetch('/me', {
+    const r = await fetch(authUrl('/me'), {
       headers: { Authorization: `Bearer ${token}` },
       credentials: 'include',
     });
@@ -1992,18 +1871,27 @@ async function init() {
   document.getElementById('sessionDate').textContent =
     now.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
 
+  const params = new URLSearchParams(location.search);
+
   // Show success flash if returning from payment
-  if (new URLSearchParams(location.search).get('success') === 'true') {
+  if (params.get('success') === 'true') {
     document.getElementById('successFlash').classList.add('show');
-    // Remove ?success=true from URL without reloading
     history.replaceState({}, '', location.pathname);
   }
+
+  // If the user just finished sign-up via the Upgrade flow, resume checkout once Clerk loads.
+  const resumeUpgrade = params.get('upgrade') === '1';
+  if (resumeUpgrade) history.replaceState({}, '', location.pathname);
 
   // Load Clerk + fetch plan (non-blocking — board loads optimistically)
   loadClerkAndPlan().then(() => {
     applyPlanGating();
     // Reload board with correct limit now that we know the plan
     loadBoard();
+    // Resume checkout if they came back from the Upgrade-then-sign-up flow and they don't already have Pro.
+    if (resumeUpgrade && USER_PLAN !== 'pro' && CLERK_INSTANCE && CLERK_INSTANCE.user) {
+      clickUpgrade();
+    }
   });
 
   applyPlanGating(); // apply free defaults immediately
