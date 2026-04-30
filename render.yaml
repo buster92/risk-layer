@@ -1,6 +1,7 @@
 services:
+  # ── FastAPI: predictions, board data, model serving ──────────────────────────
   - type: web
-    name: risk-layer-api
+    name: risk-layer
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
@@ -18,10 +19,14 @@ services:
       - key: MODEL_ARTIFACTS_PATH
         value: app/models/artifacts
       - key: ALLOW_ORIGINS
-        value: '["https://risk-layer.onrender.com"]'
+        # MUST list every origin allowed to call /v1/* — the static site URL goes here.
+        # Update both the static site origin AND any custom domains. Never use "*".
+        value: '["https://risk-layer-ui.onrender.com"]'
 
+  # ── Node: auth (Clerk) + billing (Lemon Squeezy webhook) ────────────────────
+  # Pure API service now — no static-file serving. Frontend lives on the static site.
   - type: web
-    name: risk-layer-server
+    name: risk-layer-web
     runtime: node
     rootDir: server
     buildCommand: npm install
@@ -40,4 +45,66 @@ services:
       - key: LEMONSQUEEZY_CHECKOUT_URL
         sync: false  # your Lemon Squeezy checkout URL
       - key: ALLOWED_ORIGIN
-        value: https://risk-layer.onrender.com
+        # MUST match the static site origin exactly. Keep as a single value (not "*")
+        # because /me uses credentials: 'include' — wildcard origins are rejected by browsers.
+        value: https://risk-layer-ui.onrender.com
+
+  # ── Static Site: HTML/CSS/JS only — served from /frontend with security headers ─
+  - type: web
+    name: risk-layer-ui
+    runtime: static
+    buildCommand: ''            # nothing to build — pure static HTML
+    staticPublishPath: ./frontend
+    pullRequestPreviewsEnabled: false
+    routes:
+      # Pretty URLs: keep /, /app, /account working without .html extensions
+      - type: rewrite
+        source: /
+        destination: /landing.html
+      - type: rewrite
+        source: /app
+        destination: /index.html
+      - type: rewrite
+        source: /account
+        destination: /account.html
+    headers:
+      # ── Security headers applied to every response ─────────────────────────────
+      - path: /*
+        name: Content-Security-Policy
+        # Locks down where scripts/images/connections can come from.
+        # If you add a third-party script, image CDN, or analytics, append it here.
+        # Connect-src must include the Node server origin AND the FastAPI origin.
+        value: >-
+          default-src 'self';
+          script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://*.clerk.accounts.dev https://*.clerk.com;
+          style-src  'self' 'unsafe-inline' https://fonts.googleapis.com;
+          font-src   'self' https://fonts.gstatic.com data:;
+          img-src    'self' data: https://*.clerk.com https://img.clerk.com;
+          connect-src 'self' https://risk-layer.onrender.com https://risk-layer-web.onrender.com https://*.clerk.accounts.dev https://*.clerk.com https://clerk-telemetry.com;
+          frame-src  https://*.clerk.com https://*.clerk.accounts.dev;
+          frame-ancestors 'none';
+          form-action 'self' https://*.lemonsqueezy.com;
+          base-uri   'self';
+          object-src 'none';
+          upgrade-insecure-requests
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000; includeSubDomains; preload
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=(), payment=(self "https://*.lemonsqueezy.com"), usb=(), interest-cohort=()
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Resource-Policy
+        value: same-site

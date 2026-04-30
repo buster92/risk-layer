@@ -91,8 +91,12 @@ class TestMarketCalendar:
         start = dt.date(2024, 1, 2)
         end = dt.date(2024, 1, 31)
         days = trading_days_between(start, end)
-        # January 2024: 23 trading days (Jan 15 = MLK day excluded)
-        assert len(days) == 22
+        # January 2024: 21 trading days.
+        # Weekdays: 23. Minus New Year (Jan 1, before range) = 23.
+        # Minus MLK Day (Jan 15, Monday) = 22. Minus Jan 1 falls on Monday
+        # so the holiday pushes Jan 2 to be the first session.
+        # Actual NYSE count Jan 2–31 2024: 21 sessions.
+        assert len(days) == 21
 
     def test_trading_days_excludes_holidays(self):
         # Thanksgiving 2024 = Nov 28

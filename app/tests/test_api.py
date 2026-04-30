@@ -15,9 +15,18 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client():
-    """Create a TestClient with mocked DB session."""
+    """Create a TestClient with mocked DB session.
+
+    Uses the context-manager form so the FastAPI lifespan runs (which calls
+    create_all_tables on the test SQLite DB).  The scheduler is mocked out so
+    tests don't need APScheduler running.
+    """
+    from unittest.mock import patch
     from app.api.main import app
-    return TestClient(app, raise_server_exceptions=False)
+
+    with patch("app.api.main._start_scheduler"):
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
 
 
 class TestHealthEndpoint:

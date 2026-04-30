@@ -7,18 +7,35 @@ from typing import Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import get_settings
 
 settings = get_settings()
 
-engine = create_engine(
-    settings.database_url,
-    pool_size=settings.db_pool_size,
-    max_overflow=settings.db_max_overflow,
-    pool_pre_ping=True,
-    echo=settings.debug,
-)
+# SQLite in-memory (used in tests) needs special treatment:
+#   1. No connection-pool parameters (pool_size / max_overflow) — SQLite ignores pools.
+#   2. StaticPool — forces all ORM sessions to share one connection, so tables
+#      created during app startup (lifespan) are visible to route handlers.
+#   3. check_same_thread=False — required for SQLite + multi-threaded test clients.
+# PostgreSQL gets the normal production pool configuration.
+_is_sqlite = settings.database_url.startswith("sqlite")
+
+if _is_sqlite:
+    engine = create_engine(
+        settings.database_url,
+        echo=settings.debug,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    engine = create_engine(
+        settings.database_url,
+        echo=settings.debug,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_pre_ping=True,
+    )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 

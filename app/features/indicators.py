@@ -78,6 +78,9 @@ def _adx(
 def add_price_structure(df: pd.DataFrame) -> pd.DataFrame:
     c = df["adj_close"]
     o = df["open"]
+    h = df["high"]
+    l = df["low"]
+    close_raw = df["close"]  # unadjusted, for intraday candle measures
 
     df["ret_1d"] = c.pct_change(1)
     df["ret_3d"] = c.pct_change(3)
@@ -98,6 +101,18 @@ def add_price_structure(df: pd.DataFrame) -> pd.DataFrame:
     df["above_sma20"] = (c > sma20).astype(int)
     df["above_sma50"] = (c > sma50).astype(int)
     df["above_sma200"] = (c > sma200).astype(int)
+
+    # Candle quality features — critical for continuation confidence
+    # close_in_range: 0 = closed at low, 1 = closed at high.
+    #   A strong up day closing in the top 80%+ of range shows bullish commitment.
+    #   An up day closing near the low (< 0.3) is bearish — sellers took over intraday.
+    range_hl = (h - l).replace(0, np.nan)
+    df["close_in_range"] = (close_raw - l) / range_hl
+
+    # body_to_range_ratio: signed candle body as fraction of total range.
+    #   Positive = closed above open (bullish candle), negative = closed below open.
+    #   Values near +1 / -1 indicate strong directional commitment.
+    df["body_to_range_ratio"] = (close_raw - o) / range_hl
 
     return df
 
@@ -164,6 +179,13 @@ def add_participation(df: pd.DataFrame) -> pd.DataFrame:
     sum_up = pd.Series(up_vol, index=df.index).rolling(10).sum()
     sum_dn = pd.Series(dn_vol, index=df.index).rolling(10).sum()
     df["up_vol_ratio"] = sum_up / (sum_up + sum_dn).replace(0, np.nan)
+
+    # Volume acceleration: recent 3-day total vs prior 3-day total.
+    #   > 1.0 = volume expanding (demand/supply increasing) — supports continuation.
+    #   < 1.0 = volume decelerating — potential exhaustion or fading interest.
+    vol_sum_3 = vol.rolling(3).sum()
+    vol_sum_3_lag = vol.shift(3).rolling(3).sum()
+    df["vol_trend_3d"] = vol_sum_3 / vol_sum_3_lag.replace(0, np.nan)
 
     return df
 
@@ -254,6 +276,10 @@ def add_momentum(df: pd.DataFrame) -> pd.DataFrame:
     # Rate of change
     df["roc_10"] = c.pct_change(10)
     df["roc_20"] = c.pct_change(20)
+    # 3-month momentum: primary long-horizon trend signal.
+    # Research consistently shows ~63-day return as one of the strongest predictors
+    # of near-term continuation, capturing the momentum premium beyond short-term noise.
+    df["roc_63"] = c.pct_change(63)
 
     # Composite momentum score: normalized RSI deviation + ROC percentile rank
     rsi_norm = (df["rsi_14"] - 50) / 50  # -1 to +1

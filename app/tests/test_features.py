@@ -155,10 +155,16 @@ class TestExtension:
 class TestAllFeatures:
     def test_all_feature_columns_present(self, price_df):
         df = compute_all_indicators(price_df.copy())
+        # These columns are added by add_relative_context(), not compute_all_indicators()
+        relative_context_cols = {
+            "alpha_spy_1d", "alpha_spy_3d", "alpha_spy_5d",
+            "alpha_sector_1d", "alpha_sector_3d", "alpha_sector_5d",
+            "sector_trend_state", "market_regime",
+            "market_regime_hmm",  # HMM regime — needs SPY data
+            "beta_20d",           # rolling beta — needs SPY data
+        }
         missing = [f for f in ALL_FEATURES if f not in df.columns
-                   and f not in ("alpha_spy_1d", "alpha_spy_3d", "alpha_spy_5d",
-                                  "alpha_sector_1d", "alpha_sector_3d", "alpha_sector_5d",
-                                  "sector_trend_state", "market_regime")]
+                   and f not in relative_context_cols]
         assert missing == [], f"Missing feature columns: {missing}"
 
     def test_no_all_nan_columns(self, price_df):

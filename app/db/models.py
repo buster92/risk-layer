@@ -14,13 +14,32 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class JSONB(TypeDecorator):
+    """Backend-agnostic JSONB.
+
+    Uses PostgreSQL's native JSONB type (binary, indexable) when connected to
+    Postgres.  Falls back to standard JSON for SQLite and other dialects so
+    that unit tests can run without a real database.
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
+            return dialect.type_descriptor(PG_JSONB())
+        return dialect.type_descriptor(JSON())
 
 
 class Base(DeclarativeBase):

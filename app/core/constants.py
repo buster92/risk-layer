@@ -25,8 +25,11 @@ BENCHMARK = "SPY"
 
 # ── Classification labels ─────────────────────────────────────────────────────
 class Classification:
-    FAVORABLE_SETUP = "Favorable setup"
+    # Continuation tiers — two distinct levels of confidence
+    STRONG_CONTINUATION = "Strong continuation profile"       # highest bar: both horizons confirm, ADX trending, sector aligned
+    FAVORABLE_SETUP = "Trend-confirming participation"        # solid setup: trend supports, drawdown risk acceptable
     WEAK_CONTINUATION = "Weak continuation setup"
+    # Deceptive move patterns
     BREAKOUT_EXHAUSTION = "Breakout with exhaustion risk"
     SPECULATIVE_SPIKE = "Speculative spike"
     PANIC_FLUSH = "Panic flush with unstable structure"
@@ -69,6 +72,9 @@ PRICE_FEATURES = [
     "dist_sma20", "dist_sma50",
     "slope_sma20", "slope_sma50",
     "above_sma20", "above_sma50", "above_sma200",
+    # Candle quality — where did price close in its range, and how committed was the body?
+    "close_in_range",       # 0=closed at low, 1=closed at high; key continuation signal
+    "body_to_range_ratio",  # signed: +1=full bullish body, -1=full bearish body
 ]
 
 VOL_FEATURES = [
@@ -85,6 +91,7 @@ PARTICIPATION_FEATURES = [
     "rel_dollar_vol",
     "vol_percentile",
     "up_vol_ratio",
+    "vol_trend_3d",  # volume acceleration: recent 3d vs prior 3d; > 1 = expanding demand
 ]
 
 TREND_FEATURES = [
@@ -106,6 +113,8 @@ RELATIVE_FEATURES = [
     "alpha_sector_1d", "alpha_sector_3d", "alpha_sector_5d",
     "sector_trend_state",
     "market_regime",
+    "market_regime_hmm",  # Gaussian HMM 3-state regime (0=bear, 1=choppy, 2=bull)
+    "beta_20d",           # rolling 20-day market beta; high beta reduces signal credibility
 ]
 
 MOMENTUM_FEATURES = [
@@ -113,6 +122,7 @@ MOMENTUM_FEATURES = [
     "macd_signal",
     "roc_10",
     "roc_20",
+    "roc_63",             # 3-month momentum: strongest single predictor of continuation
     "price_momentum_score",
 ]
 
@@ -126,7 +136,10 @@ ALL_FEATURES = (
     + MOMENTUM_FEATURES
 )
 
-# Continuation models: direction-sensitive — momentum matters more than full vol suite
+# Continuation models: direction-sensitive — momentum + candle quality matter most.
+# close_in_range and body_to_range_ratio (in PRICE_FEATURES) are the primary additions.
+# range_expansion_ratio added: a wide-range day that closes high/low is a stronger signal.
+# roc_63, beta_20d, market_regime_hmm: v2 additions from 2024–2026 research.
 CONTINUATION_FEATURES = (
     PRICE_FEATURES
     + PARTICIPATION_FEATURES
@@ -134,7 +147,7 @@ CONTINUATION_FEATURES = (
     + EXTENSION_FEATURES
     + RELATIVE_FEATURES
     + MOMENTUM_FEATURES
-    + ["atr_pct", "rvol_5d", "rvol_10d"]  # targeted vol subset only
+    + ["atr_pct", "rvol_5d", "rvol_10d", "range_expansion_ratio"]  # targeted vol subset
 )
 
 # Risk models use everything

@@ -39,7 +39,7 @@ movecred/
 │   ├── jobs/             daily_ingest, daily_predict, daily_digest, weekly_eval, backfill
 │   ├── services/         stock_analysis, ranking, digest, outcome tracking
 │   └── tests/
-├── scripts/              run_backfill, run_train_all, run_daily
+├── scripts/              run_backfill, run_train_all, run_daily, run_entry_check, run_week_validation
 └── docs/
 ```
 
@@ -88,18 +88,18 @@ python3 scripts/run_backfill.py --start 2019-01-01
 
 ```bash
 # Trains all four classifiers with walk-forward validation
-python scripts/run_train_all.py
+python3 scripts/run_train_all.py
 
 # Skip walk-forward for a fast test run
-python scripts/run_train_all.py --skip-wf
+python3 scripts/run_train_all.py --skip-wf
 ```
 
 ### 6. Run daily pipeline (manual)
 
 ```bash
-python scripts/run_daily.py
+python3 scripts/run_daily.py
 # or for a specific date:
-python scripts/run_daily.py --date 2024-11-15
+python3  scripts/run_daily.py --date 2024-11-15
 ```
 
 ### 7. Start the API
@@ -199,6 +199,72 @@ Violating any of these would produce deceptively good-looking backtests that fai
 - [ ] Deploy PostgreSQL to Render / Neon / RDS
 - [ ] Set up cron or platform scheduler for daily jobs (or let APScheduler run in the app)
 - [ ] Add alert delivery (email/webhook) in `alert_service.py`
+
+---
+
+## Utility scripts
+
+### `run_entry_check.py` — Morning entry check
+
+Run this at 9:30–9:35 AM ET on any live trading day to evaluate whether the model's top continuation candidate has a clean entry at the open.
+
+```bash
+python3 scripts/run_entry_check.py                    # default: today's predictions
+python3 scripts/run_entry_check.py --date 2024-11-15  # evaluate a specific past day
+```
+
+**What it does:**
+
+Loads the top continuation candidate from the specified date's model predictions (via `get_top_continuation`). Downloads recent OHLCV and live intraday data via yfinance, computes 14-day ATR, and prints two verdicts:
+
+- `OPEN ENTRY` — was the open-price entry clean relative to ATR?
+- `CURRENT` — is the current price still a valid entry right now?
+
+**Verdict thresholds (gap / ATR):**
+
+| Ratio | Verdict | Meaning |
+|---|---|---|
+| < 0.5x | `BUY / CLEAN ENTRY` | Entry is within normal range; edge intact |
+| 0.5–1.0x | `CAUTION` | Gap is marginal; consider reducing size or waiting |
+| ≥ 1.0x | `SKIP` | Move too extreme; model edge is gone for today |
+
+If no stock passes the minimum signal threshold (`p_continue_3d ≥ 0.45`, favorable classification), the script prints `NO SETUP TODAY` and exits. Do not substitute a neutral stock — wait for the next session.
+
+When the open verdict is `BUY`, the script also prints a suggested stop (1 ATR from open) and a 3-day target (2 ATR from open).
+
+---
+
+### `run_week_validation.py` — Walk-forward outcome validation
+
+Runs the full ingest + predict pipeline for a past week of trading days, realizes outcomes, and prints a detailed prediction-vs-reality report. Use this to verify that the model has real lift before deploying or after retraining.
+
+```bash
+python3 scripts/run_week_validation.py                          # default: 5 days ending ~6 trading days ago
+python3 scripts/run_week_validation.py --end 2026-03-14         # specify the last day of the window
+python3 scripts/run_week_validation.py --end 2026-03-14 --days 10  # validate a 10-day window
+python3 scripts/run_week_validation.py --skip-ingest            # skip ingest if data already in DB
+```
+
+The default window ends at least 6 trading days before today so all outcome horizons (3D continuation, 5D drawdown) have fully elapsed and outcomes can be realized. Passing an `--end` date closer than ~7 trading days to today will result in unrealized outcomes and an inconclusive verdict.
+
+**What it outputs:**
+
+1. **Per-stock per-day detail table** — classification, predicted probabilities, and realized outcomes (`CONT✓`, `DRAW✓`, max adverse excursion) for every stock in the window.
+2. **Daily accuracy summary** — continuation and drawdown accuracy per day.
+3. **Lift table by classification** — hit rate vs baseline for each class, sorted by lift. This is the core validity check.
+4. **Verdict** — `PASS` / `FAIL` / `NEEDS MORE DATA` for whether favorable classes outperform the baseline and weak/trap classes underperform it.
+
+**Column guide:**
+
+| Column | Meaning |
+|---|---|
+| `C3D` | Predicted continuation probability (3 days) |
+| `D5D` | Predicted drawdown risk (5 days) — lower is safer |
+| `RISK` | Composite deception risk score — lower is safer |
+| `CONT✓` | Did price actually continue in the predicted direction? |
+| `DRAW✓` | Did an adverse excursion > 3% actually occur? |
+| `MAE` | Max adverse excursion realized in 5 days |
+| `LIFT` | Hit rate minus baseline — positive means the engine adds value |
 
 ---
 

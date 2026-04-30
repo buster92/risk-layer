@@ -22,6 +22,7 @@ from app.data.providers.benchmark_data import fetch_benchmark, fetch_sector_etfs
 from app.db.models import DailyFeature, DailyPrice, Stock
 from app.features.indicators import compute_all_indicators
 from app.features.labeling import compute_labels
+from app.features.regime_detection import compute_spy_regime
 from app.features.relative_context import add_relative_context
 
 logger = get_logger(__name__)
@@ -61,11 +62,18 @@ def build_stock_features(
     sector_df: pd.DataFrame,
     db: Session,
     compute_labels_flag: bool = True,
+    spy_regime: "pd.Series | None" = None,
 ) -> pd.DataFrame:
     """
     Build the full feature + label frame for one stock.
     Returns DataFrame with all feature and label columns.
     Rows with insufficient history are dropped.
+
+    Parameters
+    ----------
+    spy_regime : pre-computed HMM regime Series.  Pass None to compute inline
+                 (only suitable for single-stock calls; multi-stock callers should
+                 compute once via compute_spy_regime() and pass here).
     """
     price_df = _load_stock_prices(stock.id, db)
     if price_df.empty or len(price_df) < settings.min_history_days:
@@ -77,8 +85,8 @@ def build_stock_features(
     # Compute all indicators
     df = compute_all_indicators(price_df)
 
-    # Add relative context
-    df = add_relative_context(df, spy_df, sector_df, stock.sector)
+    # Add relative context (including beta_20d and market_regime_hmm)
+    df = add_relative_context(df, spy_df, sector_df, stock.sector, spy_regime=spy_regime)
 
     # Add forward labels (NaN for recent rows where horizon not yet elapsed)
     if compute_labels_flag:
@@ -114,6 +122,14 @@ def build_full_dataset(
     spy_df = fetch_benchmark(history_start, history_end)
     sector_df = fetch_sector_etfs(history_start, history_end)
 
+    # Compute HMM regime once for all stocks (expensive — don't do it per-stock)
+    logger.info("Computing SPY market regime...")
+    try:
+        spy_regime = compute_spy_regime(spy_df)
+    except Exception as exc:
+        logger.warning("Regime computation failed — using None fallback", error=str(exc))
+        spy_regime = None
+
     # Load stocks
     query = db.query(Stock).filter(Stock.is_active == True)  # noqa: E712
     if tickers:
@@ -125,7 +141,7 @@ def build_full_dataset(
 
     for stock in stocks:
         try:
-            df = build_stock_features(stock, spy_df, sector_df, db)
+            df = build_stock_features(stock, spy_df, sector_df, db, spy_regime=spy_regime)
             if df.empty:
                 continue
 
@@ -183,10 +199,19 @@ def persist_features_for_date(
     spy_df = fetch_benchmark(history_start, date)
     sector_df = fetch_sector_etfs(history_start, date)
 
+    try:
+        spy_regime = compute_spy_regime(spy_df)
+    except Exception as exc:
+        logger.warning("Regime computation failed — using None fallback", error=str(exc))
+        spy_regime = None
+
     count = len(already_done)  # start from already-done count
     for stock in stocks_needing_features:
         try:
-            df = build_stock_features(stock, spy_df, sector_df, db, compute_labels_flag=False)
+            df = build_stock_features(
+                stock, spy_df, sector_df, db,
+                compute_labels_flag=False, spy_regime=spy_regime,
+            )
             if df.empty:
                 continue
 

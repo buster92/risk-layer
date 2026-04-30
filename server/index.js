@@ -1,10 +1,11 @@
 'use strict';
 require('dotenv').config();
 
-const path    = require('path');
 const crypto  = require('crypto');
 const express = require('express');
 const cors    = require('cors');
+const helmet  = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const { ClerkExpressRequireAuth, clerkClient } = require('@clerk/clerk-sdk-node');
 
@@ -16,38 +17,96 @@ const pool = new Pool({
   connectionString: dbUrl,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
-const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
 
-// ── Middleware ────────────────────────────────────────────────────
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*', credentials: true }));
+// ── Trust proxy ──────────────────────────────────────────────────
+// Render terminates TLS at its edge — we must trust X-Forwarded-* for
+// correct client IP (needed by rate limiting) and secure-cookie handling.
+// Trust only the first proxy hop to avoid IP spoofing via forged headers.
+app.set('trust proxy', 1);
 
-// Webhook route needs raw body for HMAC verification — register BEFORE json()
+// ── Security middleware ──────────────────────────────────────────
+// Helmet sets sensible defaults: X-Content-Type-Options, X-DNS-Prefetch-Control,
+// X-Download-Options, X-Frame-Options, Strict-Transport-Security, etc.
+// We disable its CSP because this service is pure JSON API — no HTML served.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'same-site' },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
+
+// ── CORS ─────────────────────────────────────────────────────────
+// Fail-closed: if ALLOWED_ORIGIN is not configured, refuse all cross-origin
+// requests rather than silently falling back to "*". Because /me uses
+// credentials: 'include', browsers reject wildcard origins anyway — so a
+// missing env var should fail loudly in the logs, not silently.
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
+if (!ALLOWED_ORIGIN) {
+  console.error('[server] FATAL: ALLOWED_ORIGIN is not set. Refusing to start with open CORS.');
+  process.exit(1);
+}
+app.use(cors({
+  origin: ALLOWED_ORIGIN,
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 600,
+}));
+
+// ── Rate limiting ────────────────────────────────────────────────
+// Global soft cap — protects against accidental floods / basic abuse.
+// Clerk and Lemon Squeezy traffic bypass this via dedicated limiters below.
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000,     // 1 minute
+  max: 120,                // 120 req/min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+app.use(globalLimiter);
+
+// Tighter limiter for /me — authenticated endpoint that hits the DB + Clerk.
+const meLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+// /config is public and unauthenticated — keep it cheap.
+const configLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+// Webhook route needs raw body for HMAC verification — register BEFORE json().
+// Cap the payload at 64 KB: Lemon Squeezy events are a few KB at most.
 app.post(
   '/webhook/lemonsqueezy',
-  express.raw({ type: 'application/json' }),
+  express.raw({ type: 'application/json', limit: '64kb' }),
   handleLemonSqueezyWebhook
 );
 
-app.use(express.json());
+// JSON body parser for everything else, with a tight limit (no endpoint
+// accepts large payloads today).
+app.use(express.json({ limit: '16kb' }));
 
 // ── Public config ─────────────────────────────────────────────────
 // Returns non-secret config the frontend needs to bootstrap Clerk + payments
-app.get('/config', (_, res) => {
+app.get('/config', configLimiter, (_, res) => {
+  res.set('Cache-Control', 'no-store');
   res.json({
     clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || null,
     checkoutUrl:         process.env.LEMONSQUEEZY_CHECKOUT_URL || null,
   });
 });
 
-// ── Static files ──────────────────────────────────────────────────
-// Landing page
-app.get('/', (_, res) => res.sendFile(path.join(FRONTEND_DIR, 'landing.html')));
-// Dashboard (protected by Clerk middleware below)
-app.get('/app', (_, res) => res.sendFile(path.join(FRONTEND_DIR, 'index.html')));
-// Account page
-app.get('/account', (_, res) => res.sendFile(path.join(FRONTEND_DIR, 'account.html')));
-// Serve any other static assets (CSS, JS, images)
-app.use(express.static(FRONTEND_DIR));
+// ── Health check ─────────────────────────────────────────────────
+// Lightweight liveness probe — no DB query, no auth.
+app.get('/healthz', (_, res) => res.json({ ok: true }));
 
 // ── Database init ─────────────────────────────────────────────────
 async function initDb() {
@@ -70,7 +129,8 @@ async function initDb() {
 // ── GET /me ───────────────────────────────────────────────────────
 // Returns the authenticated user's plan + status.
 // Called by the dashboard on every load.
-app.get('/me', ClerkExpressRequireAuth(), async (req, res) => {
+app.get('/me', meLimiter, ClerkExpressRequireAuth(), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     const userId = req.auth.userId;
 
@@ -208,14 +268,25 @@ async function handleLemonSqueezyWebhook(req, res) {
 // ── Start ─────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 
+// Generic 404 handler — keeps error shape consistent for the frontend.
+app.use((_, res) => res.status(404).json({ error: 'Not found' }));
+
+// Last-resort error handler — log internally, leak nothing externally.
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  console.error('[server] unhandled error:', err && err.message ? err.message : err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 initDb()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`[server] RiskLayer running at http://localhost:${PORT}`);
-      console.log(`  /           → landing page`);
-      console.log(`  /app        → dashboard`);
-      console.log(`  /account    → account/billing`);
-      console.log(`  /me         → user plan (authenticated)`);
+      console.log(`[server] RiskLayer API running on port ${PORT}`);
+      console.log(`  ALLOWED_ORIGIN = ${ALLOWED_ORIGIN}`);
+      console.log(`  /healthz              → liveness`);
+      console.log(`  /config               → public bootstrap config`);
+      console.log(`  /me                   → user plan (authenticated)`);
       console.log(`  /webhook/lemonsqueezy → payment events`);
     });
   })

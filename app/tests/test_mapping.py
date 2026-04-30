@@ -41,6 +41,76 @@ def make_bundle(**kwargs) -> PredictionBundle:
     return PredictionBundle(**defaults)
 
 
+class TestStrongContinuation:
+    def test_fires_when_all_conditions_met(self):
+        bundle = make_bundle(
+            p_continue_3d=0.70,   # >= strong_cont_threshold (0.65)
+            p_continue_5d=0.60,   # >= 0.55
+            p_drawdown_5d=0.22,   # < 0.30
+            adx=28.0,
+            adx_slope=0.08,       # ADX_STRENGTHENING flag
+            sector_trend_state=1,  # SECTOR_ALIGNED flag
+            market_regime=1,
+            move_zscore=0.6,      # not extended
+            dist_sma20=0.03,
+        )
+        result = classify(bundle)
+        assert result.classification == Classification.STRONG_CONTINUATION
+        assert result.confidence_bucket == "high"
+
+    def test_does_not_fire_without_p5_confirmation(self):
+        """5-day horizon must also confirm — single-horizon conviction is not enough."""
+        bundle = make_bundle(
+            p_continue_3d=0.70,
+            p_continue_5d=0.45,   # too low — fails 5d confirmation
+            p_drawdown_5d=0.22,
+            adx=28.0,
+            adx_slope=0.08,
+            sector_trend_state=1,
+            market_regime=1,
+        )
+        result = classify(bundle)
+        assert result.classification != Classification.STRONG_CONTINUATION
+
+    def test_does_not_fire_when_adx_not_strengthening(self):
+        """ADX must be trending AND strengthening (rising slope)."""
+        bundle = make_bundle(
+            p_continue_3d=0.70,
+            p_continue_5d=0.60,
+            p_drawdown_5d=0.22,
+            adx=28.0,
+            adx_slope=-0.02,      # ADX declining — not strengthening
+            sector_trend_state=1,
+        )
+        result = classify(bundle)
+        assert result.classification != Classification.STRONG_CONTINUATION
+
+    def test_does_not_fire_when_sector_not_aligned(self):
+        bundle = make_bundle(
+            p_continue_3d=0.70,
+            p_continue_5d=0.60,
+            p_drawdown_5d=0.22,
+            adx=28.0,
+            adx_slope=0.08,
+            sector_trend_state=-1,  # sector not aligned
+            market_regime=1,
+        )
+        result = classify(bundle)
+        assert result.classification != Classification.STRONG_CONTINUATION
+
+    def test_does_not_fire_when_drawdown_risk_high(self):
+        bundle = make_bundle(
+            p_continue_3d=0.70,
+            p_continue_5d=0.60,
+            p_drawdown_5d=0.35,   # > 0.30 threshold
+            adx=28.0,
+            adx_slope=0.08,
+            sector_trend_state=1,
+        )
+        result = classify(bundle)
+        assert result.classification != Classification.STRONG_CONTINUATION
+
+
 class TestFavorableSetup:
     def test_fires_correctly(self):
         bundle = make_bundle(

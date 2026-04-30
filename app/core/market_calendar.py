@@ -25,6 +25,11 @@ def trading_days_between(start: dt.date, end: dt.date) -> pd.DatetimeIndex:
     schedule = cal.schedule(
         start_date=start.isoformat(), end_date=end.isoformat()
     )
+    # Guard against empty schedule (e.g. a single holiday date) — newer
+    # pandas_market_calendars raises AttributeError on .dt inside date_range
+    # when the schedule DataFrame is empty.
+    if schedule.empty:
+        return pd.DatetimeIndex([])
     return mcal.date_range(schedule, frequency="1D").normalize()
 
 

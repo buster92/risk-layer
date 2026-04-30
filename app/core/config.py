@@ -42,8 +42,15 @@ class Settings(BaseSettings):
     active_universe_min_volume: int = 500_000
     active_universe_min_rvol: float = 1.2   # min relative dollar-volume vs 20d avg (1.2 = 20% above avg)
 
+    # ── Regime detection ─────────────────────────────────────────────────────
+    # Gaussian HMM market regime feature.  States are sorted by mean log-return
+    # so 0=bear, 1=choppy, 2=bull regardless of random HMM initialization order.
+    # Falls back to SMA/ROC rules if hmmlearn is not installed.
+    regime_n_states: int = 3
+    regime_refit_days: int = 63   # refit HMM every N trading days
+
     # ── Feature engineering ────────────────────────────────────────────────────
-    feature_version: str = "v1"
+    feature_version: str = "v2"
     min_history_days: int = 252             # 1 year needed before features are valid
     sma_short: int = 20
     sma_mid: int = 50
@@ -56,12 +63,19 @@ class Settings(BaseSettings):
     rel_vol_window: int = 20
 
     # ── Label thresholds ──────────────────────────────────────────────────────
-    continuation_threshold_pct: float = 0.5    # % continuation required
+    continuation_threshold_pct: float = 0.5    # % continuation required (legacy fixed-threshold)
     continuation_min_move_pct: float = 0.5     # ignore days with |ret_1d| below this
     drawdown_threshold_pct: float = 3.0        # % adverse move for drawdown label
     mean_revert_threshold_pct: float = 2.0     # % reversion for mean-revert label
     label_horizon_short: int = 3               # trading days
     label_horizon_long: int = 5                # trading days
+
+    # ── Triple barrier labeling ───────────────────────────────────────────────
+    # When enabled, continuation labels use ATR-relative barriers (Lopez de Prado)
+    # instead of a fixed % threshold.  The upper/lower barrier is atr_mult × ATR_pct
+    # above/below today's close; whichever is touched first within the horizon wins.
+    continuation_use_triple_barrier: bool = True
+    continuation_barrier_atr_mult: float = 1.0  # barrier = atr_mult × ATR_pct × close
 
     # ── Model ─────────────────────────────────────────────────────────────────
     model_version: str = "v1"
@@ -71,6 +85,9 @@ class Settings(BaseSettings):
     # ── Walk-forward validation ────────────────────────────────────────────────
     wf_train_years: int = 3
     wf_test_months: int = 3
+    # Embargo: exclude this many days before each test fold to prevent label leakage.
+    # Lopez de Prado recommends horizon_long as minimum; 7 days is a conservative default.
+    wf_embargo_days: int = 7
 
     # ── Classification mapper ─────────────────────────────────────────────────
     strong_cont_threshold: float = 0.65

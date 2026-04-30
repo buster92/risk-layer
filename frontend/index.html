@@ -7,6 +7,14 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <!-- Clerk script is loaded dynamically in loadClerkAndPlan() after /config returns the publishable key -->
+<script>
+  // Where the Node auth/billing server lives. The frontend is a separate static site,
+  // so /config, /me, etc. need an absolute URL in production. Localhost dev keeps same-origin.
+  // EDIT THIS ONE LINE: replace with your actual Node service URL on Render (or a custom domain).
+  window.AUTH_ORIGIN = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+    ? ''
+    : 'https://risk-layer-web.onrender.com';
+</script>
 
 <style>
   :root {
@@ -1326,17 +1334,26 @@ function sortedFlags(flags) {
 // ─────────────────────────────────────────────────────────────────
 // Render helpers
 // ─────────────────────────────────────────────────────────────────
+// XSS guard: every string that originates from the API and is then dropped into
+// innerHTML must go through escapeHtml(). Numeric fields and locally-derived
+// constants (verdict labels, color CSS vars) don't need it.
+const _ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;' };
+function escapeHtml(v) {
+  if (v == null) return '';
+  return String(v).replace(/[&<>"'/]/g, (c) => _ESCAPE_MAP[c]);
+}
+
 function renderFlags(flags, max = 3) {
   if (!flags || !flags.length) return '<span style="color:var(--text-dim);font-size:10px">—</span>';
   const sorted = sortedFlags(flags);
   return sorted.slice(0, max).map(f => {
     const s = flagStyle(f);
-    return `<span class="flag-chip ${s}">${f}</span>`;
+    return `<span class="flag-chip ${s}">${escapeHtml(f)}</span>`;
   }).join('') + (flags.length > max ? `<span class="flag-chip" style="color:var(--text-dim)">+${flags.length-max}</span>` : '');
 }
 
 function renderBadge(cls) {
-  return `<span class="classification-badge ${badgeClass(cls)}"><span class="badge-dot"></span>${cls || '—'}</span>`;
+  return `<span class="classification-badge ${badgeClass(cls)}"><span class="badge-dot"></span>${escapeHtml(cls || '—')}</span>`;
 }
 
 function fmt(val) {
@@ -1366,8 +1383,8 @@ function renderBoardRow(s, mode = 'board') {
   if (mode === 'board') {
     tr.innerHTML = `
       <td class="td-rank">${s.rank}</td>
-      <td class="td-ticker">${s.ticker}</td>
-      <td class="td-name">${s.company_name || '—'}</td>
+      <td class="td-ticker">${escapeHtml(s.ticker)}</td>
+      <td class="td-name">${escapeHtml(s.company_name || '—')}</td>
       <td class="td-verdict">${renderVerdict(s)}</td>
       <td class="td-class">${renderBadge(s.classification)}</td>
       <td class="td-prob-primary" style="color:${riskColor(s.p_drawdown_5d)}">${fmt(s.p_drawdown_5d)}</td>
@@ -1382,8 +1399,8 @@ function renderBoardRow(s, mode = 'board') {
   } else if (mode === 'risks') {
     tr.innerHTML = `
       <td class="td-rank">${s.rank}</td>
-      <td class="td-ticker">${s.ticker}</td>
-      <td class="td-name">${s.company_name || '—'}</td>
+      <td class="td-ticker">${escapeHtml(s.ticker)}</td>
+      <td class="td-name">${escapeHtml(s.company_name || '—')}</td>
       <td class="td-verdict">${renderVerdict(s)}</td>
       <td class="td-class">${renderBadge(s.classification)}</td>
       <td class="td-prob-primary" style="color:${riskColor(s.p_drawdown_5d)}">${fmt(s.p_drawdown_5d)}</td>
@@ -1393,8 +1410,8 @@ function renderBoardRow(s, mode = 'board') {
   } else if (mode === 'conts') {
     tr.innerHTML = `
       <td class="td-rank">${s.rank}</td>
-      <td class="td-ticker">${s.ticker}</td>
-      <td class="td-name">${s.company_name || '—'}</td>
+      <td class="td-ticker">${escapeHtml(s.ticker)}</td>
+      <td class="td-name">${escapeHtml(s.company_name || '—')}</td>
       <td class="td-verdict">${renderVerdict(s)}</td>
       <td class="td-class">${renderBadge(s.classification)}</td>
       <td class="td-prob-secondary" style="color:${riskColor(s.risk_score)}">${fmtScore(s.risk_score)}</td>
@@ -1420,7 +1437,8 @@ async function openPanel(ticker) {
 
   let data = stockCache[ticker];
   if (!data) {
-    data = await apiGet(`/stocks/${ticker}/analysis`);
+    // encodeURIComponent on the ticker — defense in depth in case any non-canonical chars sneak through.
+    data = await apiGet(`/stocks/${encodeURIComponent(ticker)}/analysis`);
     if (data) stockCache[ticker] = data;
   }
 
@@ -1452,9 +1470,9 @@ async function openPanel(ticker) {
     <div class="panel-section">
       <div class="panel-verdict-block verdict-${v.key}">
         <div style="flex:1">
-          <div class="panel-verdict-label">${v.label}</div>
+          <div class="panel-verdict-label">${escapeHtml(v.label)}</div>
           <div>${renderBadge(data.classification)}</div>
-          <div class="panel-verdict-interp">${data.interpretation || '—'}</div>
+          <div class="panel-verdict-interp">${escapeHtml(data.interpretation || '—')}</div>
         </div>
       </div>
     </div>
@@ -1494,7 +1512,7 @@ async function openPanel(ticker) {
         ${sortedAllFlags.map(f => {
           const s = flagStyle(f);
           const cls = s === 'warn' ? 'reason-warn' : s === 'good' ? 'reason-good' : 'reason-neutral';
-          return `<div class="reason-row ${cls}"><span class="reason-dot"></span>${f}</div>`;
+          return `<div class="reason-row ${cls}"><span class="reason-dot"></span>${escapeHtml(f)}</div>`;
         }).join('')}
       </div>
     </div>` : ''}
@@ -1525,7 +1543,7 @@ async function openPanel(ticker) {
       <div class="mini-history">
         ${histRows.reverse().map(h => `
           <div class="history-row">
-            <span class="history-date">${h.date}</span>
+            <span class="history-date">${escapeHtml(h.date)}</span>
             <span class="history-class">${renderBadge(h.classification)}</span>
             <span class="history-prob" style="color:${riskColor(h.risk_score)}">${fmtScore(h.risk_score)}</span>
           </div>`).join('')}
@@ -1663,11 +1681,11 @@ async function loadDigest() {
     d.onclick = () => openPanel(s.ticker);
     d.innerHTML = `
       <div class="digest-card-top">
-        <span class="digest-ticker">${s.ticker}</span>
+        <span class="digest-ticker">${escapeHtml(s.ticker)}</span>
         ${renderVerdict(s)}
       </div>
       <div style="margin-bottom:6px">${renderBadge(s.classification)}</div>
-      <div class="digest-interp">${s.interpretation || ''}</div>
+      <div class="digest-interp">${escapeHtml(s.interpretation || '')}</div>
       <div style="margin-top:8px;display:flex;gap:12px;font-size:10px;color:var(--text-dim)">
         <span>Draw 5D: <span style="color:${riskColor(s.p_drawdown_5d)}">${fmt(s.p_drawdown_5d)}</span></span>
         <span>Cont 3D: <span style="color:${probColor(s.p_continue_3d)}">${fmt(s.p_continue_3d)}</span></span>
@@ -1683,11 +1701,11 @@ async function loadDigest() {
     d.onclick = () => openPanel(s.ticker);
     d.innerHTML = `
       <div class="digest-card-top">
-        <span class="digest-ticker">${s.ticker}</span>
+        <span class="digest-ticker">${escapeHtml(s.ticker)}</span>
         ${renderVerdict(s)}
       </div>
       <div style="margin-bottom:6px">${renderBadge(s.classification)}</div>
-      <div class="digest-interp">${s.interpretation || ''}</div>
+      <div class="digest-interp">${escapeHtml(s.interpretation || '')}</div>
       <div style="margin-top:8px;display:flex;gap:12px;font-size:10px;color:var(--text-dim)">
         <span>Risk: <span style="color:${riskColor(s.risk_score)}">${fmtScore(s.risk_score)}</span></span>
         <span>Setup: <span style="color:${probColor(s.setup_quality_score)}">${fmtScore(s.setup_quality_score)}</span></span>
@@ -1816,8 +1834,11 @@ function loadClerkScript() {
   return new Promise((resolve) => {
     if (window.Clerk) return resolve(true);
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+    // Pinned major version (kills @latest supply-chain risk). Bump intentionally as needed.
+    // For full subresource integrity, add an `integrity="sha384-..."` attribute computed for this exact URL.
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@6/dist/clerk.browser.js';
     s.crossOrigin = 'anonymous';
+    s.referrerPolicy = 'no-referrer';
     s.onload  = () => resolve(true);
     s.onerror = () => resolve(false);
     document.head.appendChild(s);

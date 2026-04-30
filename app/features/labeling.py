@@ -97,6 +97,83 @@ def _drawdown_label(
     return pd.Series(labels, index=adj_close.index)
 
 
+def _triple_barrier_label(
+    adj_close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    current_return: pd.Series,
+    atr_pct: pd.Series,
+    horizon: int,
+    atr_mult: float,
+) -> pd.Series:
+    """
+    Lopez de Prado–style triple barrier labeling (Lopez de Prado, 2018).
+
+    For each date t where |current_return| >= min_move (already filtered by caller):
+      - Set an upper barrier at close[t] × (1 + atr_mult × atr_pct[t])
+      - Set a lower barrier at close[t] × (1 - atr_mult × atr_pct[t])
+      - Scan the next *horizon* bars' high/low to find which barrier is touched first.
+
+    For an UP day (current_return > 0):
+      - Upper barrier touched first → label 1  (continuation)
+      - Lower barrier touched first → label 0  (reversal / stop-out)
+      - Neither touched within horizon → label 0 (no follow-through)
+
+    For a DOWN day (current_return < 0):
+      - Lower barrier touched first → label 1  (continuation)
+      - Upper barrier touched first → label 0  (reversal / stop-out)
+      - Neither touched within horizon → label 0 (no follow-through)
+
+    This replaces the fixed % threshold with a stock-specific, volatility-adapted
+    threshold, which is the key fix for the near-random AUC on continuation models.
+    """
+    n = len(adj_close)
+    labels = np.full(n, np.nan)
+
+    close_arr = adj_close.values
+    high_arr = high.values
+    low_arr = low.values
+    ret_arr = current_return.values
+    atr_arr = atr_pct.values
+
+    for i in range(n - horizon):
+        c0 = close_arr[i]
+        ret = ret_arr[i]
+        atr = atr_arr[i]
+
+        if np.isnan(ret) or np.isnan(c0) or np.isnan(atr) or c0 == 0:
+            continue
+
+        barrier_width = atr_mult * atr  # fraction of close
+        upper = c0 * (1.0 + barrier_width)
+        lower = c0 * (1.0 - barrier_width)
+
+        future_high = high_arr[i + 1 : i + horizon + 1]
+        future_low = low_arr[i + 1 : i + horizon + 1]
+
+        # Find the first index (0-based within window) that touches each barrier
+        upper_hits = np.where(future_high >= upper)[0]
+        lower_hits = np.where(future_low <= lower)[0]
+
+        up_idx = int(upper_hits[0]) if len(upper_hits) > 0 else horizon + 1
+        dn_idx = int(lower_hits[0]) if len(lower_hits) > 0 else horizon + 1
+
+        if ret > 0:
+            # Bullish day: upper = continuation target, lower = stop-out
+            if up_idx <= dn_idx and up_idx <= horizon:
+                labels[i] = 1
+            else:
+                labels[i] = 0
+        else:
+            # Bearish day: lower = continuation target, upper = stop-out
+            if dn_idx <= up_idx and dn_idx <= horizon:
+                labels[i] = 1
+            else:
+                labels[i] = 0
+
+    return pd.Series(labels, index=adj_close.index)
+
+
 def _mean_revert_label(
     adj_close: pd.Series,
     current_return: pd.Series,
@@ -140,6 +217,8 @@ def compute_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     Required columns: date, adj_close, high, low
     The column `ret_1d` must already exist (from indicators.py).
+    When settings.continuation_use_triple_barrier is True (default), continuation
+    labels use ATR-adaptive triple barrier labeling instead of the fixed threshold.
     """
     df = df.sort_values("date").reset_index(drop=True)
     c = df["adj_close"]
@@ -154,12 +233,29 @@ def compute_labels(df: pd.DataFrame) -> pd.DataFrame:
     min_move = settings.continuation_min_move_pct / 100.0
     ret_for_labels = ret.where(ret.abs() >= min_move)
 
-    df["continue_3d"] = _continuation_label(
-        c, ret_for_labels, settings.label_horizon_short, settings.continuation_threshold_pct
-    )
-    df["continue_5d"] = _continuation_label(
-        c, ret_for_labels, settings.label_horizon_long, settings.continuation_threshold_pct
-    )
+    if settings.continuation_use_triple_barrier and "atr_pct" in df.columns:
+        # Triple barrier: ATR-relative barriers adapt to each stock's volatility.
+        # This is the primary fix for near-random AUC on continuation models.
+        atr_pct = df["atr_pct"]
+        df["continue_3d"] = _triple_barrier_label(
+            c, h, l, ret_for_labels, atr_pct,
+            settings.label_horizon_short,
+            settings.continuation_barrier_atr_mult,
+        )
+        df["continue_5d"] = _triple_barrier_label(
+            c, h, l, ret_for_labels, atr_pct,
+            settings.label_horizon_long,
+            settings.continuation_barrier_atr_mult,
+        )
+    else:
+        # Fallback: legacy fixed-threshold labeling
+        df["continue_3d"] = _continuation_label(
+            c, ret_for_labels, settings.label_horizon_short, settings.continuation_threshold_pct
+        )
+        df["continue_5d"] = _continuation_label(
+            c, ret_for_labels, settings.label_horizon_long, settings.continuation_threshold_pct
+        )
+
     df["drawdown_gt_3pct_5d"] = _drawdown_label(
         h, l, c, ret, settings.label_horizon_long, settings.drawdown_threshold_pct
     )

@@ -143,6 +143,11 @@ class TestLabelCoverage:
         df = compute_labels(df)
 
         labeled_3d = df["continue_3d"].dropna()
-        assert len(labeled_3d) >= n - 10, "Should have close to n-5 labeled rows for 3D"
+        # NaN rows come from two sources:
+        #   1. The last `horizon` rows (no forward data yet)
+        #   2. Days where |ret_1d| < continuation_min_move_pct (low-conviction filter)
+        # With N(0, 0.01) daily returns and a 0.5% min-move threshold,
+        # ~60% of days qualify. n=300 → expect ~170-200 labeled rows.
+        assert len(labeled_3d) >= n // 2, "Should have at least half the rows labeled for 3D"
         assert labeled_3d.sum() > 0, "Should have some positive labels"
         assert (1 - labeled_3d).sum() > 0, "Should have some negative labels"

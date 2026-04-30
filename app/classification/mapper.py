@@ -97,9 +97,9 @@ def compute_flags(b: PredictionBundle) -> list[str]:
     if p3 < 0.42:
         flags.append(Flag.FOLLOW_THROUGH_WEAK)
 
-    if rel_vol >= settings.high_relvol_threshold and sector_state <= 0:
-        flags.append(Flag.REL_VOL_SUPPORTIVE) if Flag.REL_VOL_SUPPORTIVE not in flags else None
-    elif rel_vol >= 1.2 and sector_state >= 1:
+    # Volume is "supportive" when it accompanies a move in an aligned sector context.
+    # High volume into a weak sector is noise, not confirmation.
+    if rel_vol >= 1.2 and sector_state >= 1:
         flags.append(Flag.REL_VOL_SUPPORTIVE)
 
     if _safe(b.p_mean_revert_3d, 0.0) > 0.55:
@@ -109,19 +109,30 @@ def compute_flags(b: PredictionBundle) -> list[str]:
 
 
 def compute_deception_score(b: PredictionBundle, flags: list[str]) -> float:
-    """Weighted composite deception risk (0–1)."""
+    """Weighted composite deception risk (0–1).
+
+    Weights (sum = 1.0):
+      0.30 × p_drawdown_5d         — adverse excursion risk (primary risk signal)
+      0.25 × (1 − p_continue_3d)  — lack of follow-through conviction
+      0.15 × p_mean_revert_3d     — mean reversion risk (move likely to fade)
+      0.12 × PRICE_EXTENDED flag  — structural overextension
+      0.10 × VOL_EXPANDING flag   — expanding volatility = instability
+      0.08 × WEAK_SECTOR flag     — sector context not supporting the move
+    """
     p_draw = _safe(b.p_drawdown_5d, 0.3)
     p_cont = _safe(b.p_continue_3d, 0.5)
+    p_mean_rev = _safe(b.p_mean_revert_3d, 0.3)  # previously unused — now integrated
     ext = 1.0 if Flag.PRICE_EXTENDED in flags else 0.0
     vol_exp = 1.0 if Flag.VOL_EXPANDING in flags else 0.0
     weak_sec = 1.0 if Flag.WEAK_SECTOR in flags else 0.0
 
     score = (
-        0.35 * p_draw
-        + 0.30 * (1 - p_cont)
-        + 0.15 * ext
+        0.30 * p_draw
+        + 0.25 * (1 - p_cont)
+        + 0.15 * p_mean_rev
+        + 0.12 * ext
         + 0.10 * vol_exp
-        + 0.10 * weak_sec
+        + 0.08 * weak_sec
     )
     return round(min(max(score, 0.0), 1.0), 4)
 
@@ -159,14 +170,17 @@ def classify(b: PredictionBundle) -> ClassificationResult:
     risk_score = deception_score
 
     p3 = _safe(b.p_continue_3d, 0.5)
+    p5 = _safe(b.p_continue_5d, 0.5)
     p_draw = _safe(b.p_drawdown_5d, 0.3)
     adx = _safe(b.adx, 20.0)
     adx_slope = _safe(b.adx_slope, 0.0)
     exhaustion = bool(b.exhaustion_flag)
     ext = Flag.PRICE_EXTENDED in flags
     weak_sec = Flag.WEAK_SECTOR in flags
+    sector_aligned = Flag.SECTOR_ALIGNED in flags
     rel_vol_high = Flag.REL_VOL_ELEVATED in flags
     vol_expanding = Flag.VOL_EXPANDING in flags
+    adx_strengthening = Flag.ADX_STRENGTHENING in flags
 
     # ── Check if probabilities are reliable enough ─────────────────────────────
     models_missing = b.p_continue_3d is None and b.p_continue_5d is None
@@ -181,8 +195,28 @@ def classify(b: PredictionBundle) -> ClassificationResult:
             setup_quality_score=0.5,
         )
 
-    # ── Rule 1: Favorable setup ────────────────────────────────────────────────
+    # ── Rule 1a: Strong continuation profile ──────────────────────────────────
+    # Highest-confidence tier: both time horizons confirm, ADX is trending and
+    # strengthening, sector is aligned, drawdown risk is low.
     if (
+        p3 >= settings.strong_cont_threshold  # default 0.65 — both models agree
+        and p5 >= 0.55                         # 5-day horizon confirms
+        and adx > 25
+        and adx_strengthening
+        and sector_aligned
+        and not ext
+        and p_draw < 0.30
+    ):
+        cls = Classification.STRONG_CONTINUATION
+        interp = (
+            "High-conviction continuation setup: both near- and medium-term models "
+            "agree, trend structure is strengthening, sector context is aligned, "
+            "and adverse excursion risk is low."
+        )
+        bucket = ConfidenceBucket.HIGH
+
+    # ── Rule 1b: Trend-confirming participation ────────────────────────────────
+    elif (
         p3 >= 0.42
         and adx > 20
         and not weak_sec

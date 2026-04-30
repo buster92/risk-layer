@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.core.market_calendar import prev_trading_day
 from app.db.models import DailyPrediction, PredictionOutcome, Stock
-from app.services.ranking_service import get_top_favorable, get_top_risks
+from app.services.ranking_service import get_top_continuation, get_top_risks
 
 logger = get_logger(__name__)
 
@@ -28,7 +28,7 @@ def build_daily_digest(date: dt.date, db: Session) -> dict:
     Returns dict consumed by the API and email job.
     """
     top_risks = get_top_risks(date, db, limit=5)
-    top_continuations = get_top_favorable(date, db, limit=5)
+    top_continuations = get_top_continuation(date, db, limit=5)
 
     # Yesterday's outcomes (if realized)
     prev_date = prev_trading_day(date)

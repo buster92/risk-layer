@@ -78,7 +78,12 @@ def walk_forward_folds(
 
     while fold_start + test_delta <= max_date:
         fold_end = fold_start + test_delta
-        train = dataset[dataset["date"] < fold_start].dropna(subset=[target] + feature_cols)
+        # Embargo: exclude rows within `wf_embargo_days` of the test fold boundary.
+        # This prevents leaked labels from bleeding into the training set — a row
+        # labeled at t=fold_start-1 uses forward prices through fold_start+4, so
+        # naively including it in train would constitute look-ahead leakage.
+        embargo_cutoff = fold_start - dt.timedelta(days=settings.wf_embargo_days)
+        train = dataset[dataset["date"] < embargo_cutoff].dropna(subset=[target] + feature_cols)
         test = dataset[(dataset["date"] >= fold_start) & (dataset["date"] < fold_end)].dropna(
             subset=[target] + feature_cols
         )
@@ -90,7 +95,7 @@ def walk_forward_folds(
         X_tr, y_tr = train[feature_cols].values, train[target].values.astype(int)
         X_te, y_te = test[feature_cols].values, test[target].values.astype(int)
 
-        model = CalibratedClassifierCV(make_estimator(), method="sigmoid", cv=5)
+        model = CalibratedClassifierCV(make_estimator(), method=settings.calibration_method, cv=5)
         model.fit(X_tr, y_tr)
         probs = model.predict_proba(X_te)[:, 1]
         base_rate = y_tr.mean()
@@ -136,7 +141,7 @@ def train_and_save(
     # Final model on all labeled data
     df = dataset.dropna(subset=[target] + feature_cols)
     X, y = df[feature_cols].values, df[target].values.astype(int)
-    model = CalibratedClassifierCV(make_estimator(), method="sigmoid", cv=5)
+    model = CalibratedClassifierCV(make_estimator(), method=settings.calibration_method, cv=5)
     model.fit(X, y)
 
     path = Path(artifact_dir)
