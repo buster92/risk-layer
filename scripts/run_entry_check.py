@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,9 @@ from app.core.market_calendar import (
 )
 from app.db.session import get_db
 from app.services.ranking_service import get_top_continuation
+from risklayer.execution.entry_evaluator import evaluate_entry
+from risklayer.execution.portfolio_allocator import allocate_portfolio
+from risklayer.execution.position_manager import manage_position
 
 # ── ANSI colours ───────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
@@ -584,6 +588,14 @@ def main() -> None:
         description="Entry check (single-day or backtest mode)"
     )
     parser.add_argument(
+        "--mode",
+        choices=["entry", "manage", "portfolio"],
+        help="Execution assistant mode. If omitted, uses legacy single-day/backtest behavior.",
+    )
+    parser.add_argument("--ticker", help="Optional ticker override in execution modes.")
+    parser.add_argument("--paper-position-file", help="Path to JSON file containing paper position data.")
+    parser.add_argument("--json", action="store_true", help="Write execution decision JSON log.")
+    parser.add_argument(
         "--date",
         help="Prediction date YYYY-MM-DD for single-day mode (default: today)",
     )
@@ -626,6 +638,55 @@ def main() -> None:
 
     if args.backtest:
         run_backtest(days=args.days, fee_pct=fee_pct, min_p_continue=min_p_continue)
+    elif args.mode:
+        prediction_date = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
+        with get_db() as db:
+            candidates = get_top_continuation(prediction_date, db, limit=1, min_p_continue=min_p_continue)
+        if not candidates:
+            print("No candidate available.")
+            return
+        top = candidates[0]
+        ticker = args.ticker or top["ticker"]
+        top["ticker"] = ticker
+        daily = download_daily(ticker, period="3mo")
+        intraday = download_intraday(ticker)
+        prev_row = daily.iloc[-2] if str(daily.index[-1])[:10] == dt.date.today().isoformat() else daily.iloc[-1]
+        prev_close = float(prev_row["Close"])
+        atr = float(prev_row["atr"])
+        open_price = float(intraday["Open"].dropna().iloc[0])
+        latest_price = float(intraday["Close"].dropna().iloc[-1])
+        now_ts = intraday.index[-1]
+        minutes_from_open = int((now_ts - now_ts.normalize().replace(hour=9, minute=30)).total_seconds() / 60)
+        candles_1m = [{"open": float(r.Open), "high": float(r.High), "low": float(r.Low), "close": float(r.Close), "volume": float(r.Volume)} for _, r in intraday.tail(60).iterrows()]
+        candles_5m_df = intraday.tail(120).resample("5min").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+        candles_5m = [{"open": float(r.Open), "high": float(r.High), "low": float(r.Low), "close": float(r.Close), "volume": float(r.Volume)} for _, r in candles_5m_df.iterrows()]
+        if args.mode == "entry":
+            decision = evaluate_entry(top, candles_1m, candles_5m, atr, open_price, prev_close, latest_price, minutes_from_open)
+            print(f"RISKLAYER EXECUTION DECISION — {ticker}")
+        elif args.mode == "manage":
+            if not args.paper_position_file:
+                raise SystemExit("--paper-position-file is required for --mode manage")
+            position = json.loads(Path(args.paper_position_file).read_text())
+            decision = manage_position(position, position.get("latest_metrics"), [{"close": c["close"]} for c in candles_5m[-4:]], latest_price)
+            print(f"RISKLAYER POSITION MANAGEMENT — {ticker}")
+        else:
+            if not args.paper_position_file:
+                raise SystemExit("--paper-position-file is required for --mode portfolio")
+            state = json.loads(Path(args.paper_position_file).read_text())
+            decision = allocate_portfolio(state["current_position"], state["new_candidate"])
+            print(f"RISKLAYER PORTFOLIO ROTATION — {state['current_position']['ticker']}")
+        print(f\"ACTION: {decision.action.value}\")
+        print(f\"MODE: {decision.mode.value}\")
+        print(f\"CONFIDENCE: {decision.confidence:.2f}\")
+        for reason in decision.reasons:
+            sign = '+' if reason.severity in {'low','info'} else '-'
+            print(f\" {sign} {reason.message}\")
+        if args.json:
+            out_dir = Path(\"data/execution_decisions\") / dt.date.today().isoformat()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_file = out_dir / f\"{decision.ticker}.json\"
+            out_file.write_text(json.dumps(decision.to_dict(), indent=2))
+            print(f\"Saved JSON decision log to {out_file}\")
     else:
         prediction_date = (
             dt.date.fromisoformat(args.date)
