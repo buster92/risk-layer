@@ -76,17 +76,15 @@ from app.core.market_calendar import (
     last_closed_trading_day,
     trading_days_between,
 )
+from app.db.models import DailyPrediction
 from app.db.session import get_db
 from app.services.ranking_service import get_top_continuation
 
 # ── Execution-engine imports (new modes) ───────────────────────────────────
 from risklayer.execution import (
-    ExecutionAction,
     ExecutionDecision,
     PortfolioDecision,
-    Severity,
     TradeMode,
-    candidate_score,
     evaluate_entry,
     evaluate_rotation,
     manage_position,

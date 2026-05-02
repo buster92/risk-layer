@@ -1,605 +1,346 @@
-# risklayer.execution — Intraday Trading Execution Engine
+# `risklayer.execution` — Intraday Execution Engine
 
-> **Design principle:** RiskLayer (the model) decides **WHAT** to trade. This package decides **WHEN** and **HOW** to act.
+> **Design principle:** RiskLayer (the model layer under `app/`) decides
+> **WHAT** to trade. This package decides **WHEN** and **HOW** to act.
 
-The execution engine is a rule-based, deterministic layer that sits on top of RiskLayer model output and generates structured trading decisions for the entire intraday lifecycle: entry validation, position management, and portfolio rotation.
+The execution engine is a rule-based, deterministic layer that consumes
+RiskLayer model output and returns structured trading decisions for the
+intraday lifecycle: entry timing, position management, and portfolio
+rotation.
 
-All decisions are fully threshold-driven (no LLM), return transparent `ExecutionDecision` objects with human-readable reasons, and can be serialized to JSON for logging and downstream tooling.
+## Boundaries — read this first
 
----
+- **Advisory only.** The engine prints / returns recommendations as
+  structured `ExecutionDecision` objects. **It never places broker
+  orders or moves money.** "Executing" a recommendation means you act
+  manually (paper or real) and then update your paper-position JSON.
+- **No LLM in the decision path.** Every output is the result of pure
+  Python rule evaluation against the thresholds in
+  [`config.py`](./config.py). LLMs do not invent or veto trades.
+- **Deterministic.** Same inputs → same decision, every time.
+- **Structured.** Every decision carries a list of `DecisionReason`
+  records with stable codes (`GAP_TOO_LARGE`, `RECLAIM_HELD`,
+  `EDGE_COLLAPSE`, `STRONG_BETTER`, …) so downstream tooling can branch
+  on them.
 
 ## Quick start
 
 ```python
+import datetime as dt
 from risklayer.execution import (
     evaluate_entry,
     manage_position,
     evaluate_rotation,
-    ExecutionDecision,
     ExecutionAction,
     TradeMode,
-    OpenPosition,
 )
+from risklayer.execution.position_manager import OpenPosition
 
-# 1. Entry evaluation (at 9:30am, during first 30 min)
+# 1. Entry evaluation (between 9:30 and 10:00 ET).
 entry_decision = evaluate_entry(
-    candidate={"ticker": "NVDA", "p_continue_5d": 0.72, "risk_score": 0.3},
+    candidate={
+        "ticker": "IWM",
+        "p_continue_5d": 0.58,
+        "p_drawdown_5d": 0.27,
+        "risk_score": 0.20,
+        "setup_quality_score": 0.49,
+    },
     candles_1m=candles_1m,
-    atr=2.5,
-    open_price=120.50,
-    prev_close=119.80,
-    latest_price=120.40,
+    candles_5m=candles_5m,
+    atr=4.32,
+    open_price=278.66,
+    prev_close=278.20,
+    latest_price=279.10,
 )
 
 if entry_decision.action == ExecutionAction.ENTER:
-    print(f"Entry: {entry_decision.suggested_entry} | Stop: {entry_decision.suggested_stop}")
+    print(entry_decision.suggested_entry, entry_decision.suggested_stop,
+          entry_decision.conservative_take_profit, entry_decision.swing_take_profit)
 
-# 2. Position management (every 15 min during session)
+# 2. Position management (every 15 minutes during the session).
 position = OpenPosition(
-    ticker="NVDA",
-    entry_price=120.60,
-    shares=100,
-    entry_time=dt.datetime.now(),
-    stop_loss=118.10,
-    take_profit=125.00,
+    ticker="IWM",
+    entry_price=279.10,
+    shares=50,
+    entry_time=dt.datetime.now(dt.timezone.utc),
+    stop_loss=277.90,
+    take_profit=281.50,
+    mode=TradeMode.CONFIRMED_RECLAIM,
+    invalidation_level=278.20,
+    entry_metrics={"p_continue_5d": 0.58, "p_drawdown_5d": 0.27},
 )
+mgmt = manage_position(position, latest_price=279.80, candles_15m=candles_15m,
+                       latest_metrics={"p_continue_5d": 0.50, "p_drawdown_5d": 0.38})
+print(mgmt.action, mgmt.reduce_percent)
 
-mgmt_decision = manage_position(position, latest_price=123.50, candles_15m=candles_15m)
-print(f"Action: {mgmt_decision.action}")
-
-# 3. Rotation decision (when new candidate appears)
+# 3. Portfolio rotation (next morning, when a new candidate appears).
 rotation = evaluate_rotation(
-    current_position=position,
-    candidate={"ticker": "TSLA", "p_continue_5d": 0.85, "risk_score": 0.2},
-    latest_price=123.50,
+    current_ticker="IWM",
+    current_metrics={"p_continue_5d": 0.55, "p_drawdown_5d": 0.30,
+                     "risk_score": 0.30, "setup_quality_score": 0.40},
+    new_candidate_ticker="XLY",
+    new_candidate_metrics={"p_continue_5d": 0.68, "p_drawdown_5d": 0.22,
+                           "risk_score": 0.20, "setup_quality_score": 0.55},
 )
-print(f"Rotate? {rotation.decision.action == ExecutionAction.ROTATE}")
+print(rotation.decision.action, rotation.decision.rotate_to,
+      rotation.score_delta)
 ```
 
----
+## Public API
 
-## Core concepts
+### `evaluate_entry(candidate, *, candles_1m, candles_5m=None, atr, open_price, prev_close, latest_price=None, market_open=None, config=None)`
 
-### ExecutionDecision
+Returns `ExecutionDecision` with action `WAIT` / `ENTER` / `SKIP`.
 
-Every function returns an `ExecutionDecision` with:
+Cascade (top-to-bottom; first match wins):
+
+1. Invalid ATR / prices → `SKIP`.
+2. No 1m candles yet → `WAIT` (`NO_INTRADAY_DATA`).
+3. `|open - prev_close| / ATR ≥ max_open_gap_atr` (default **0.8**) →
+   `SKIP` with `GAP_TOO_LARGE`.
+4. `|latest - open| / ATR ≥ max_current_extension_atr` (default
+   **0.8**) → `SKIP` (chasing) or `WAIT` (flushed).
+5. **First 5 minutes** (`open_noise_minutes = 5`) → `WAIT` with
+   `OPEN_NOISE_WINDOW`.
+6. Pattern detection inside the **5–30 minute** window
+   (`entry_window_minutes = 30`):
+   - **Invalid first** → `WAIT`: `FAILED_BREAKOUT`,
+     `UPPER_WICK_REJECTION`, `FIRST_BOUNCE_NO_BASE`.
+   - **Valid** → `ENTER`: `FIVE_MIN_CONFIRMATION`,
+     `PULLBACK_RECLAIM`, `RECLAIM_HELD`.
+
+`ENTER` returns one of two `TradeMode`s:
+- `OPEN_ENTRY` — ATR stop (1 ATR), 2 ATR target.
+- `CONFIRMED_RECLAIM` — structure stop (just below the reclaim level
+  but never tighter than 0.4 ATR), conservative TP at 2R, plus a
+  `swing_take_profit` scaled by RiskLayer's `p_continue_5d`.
+
+### `manage_position(position, *, latest_price, candles_15m=None, latest_metrics=None, config=None)`
+
+Decisions for an open position. Priority order:
+
+1. `latest_price <= stop_loss` → `EXIT` with `STOP_HIT`.
+2. `latest_price >= take_profit` → `TAKE_PROFIT_FULL`.
+3. RiskLayer edge collapse (`p_continue_5d <= 0.50` AND
+   `p_drawdown_5d >= 0.40`) → `EXIT` with `EDGE_COLLAPSE`. Forces an
+   exit even in `SWING_HOLD` mode.
+4. 15m close below `invalidation_level` → `EXIT`
+   (`INVALIDATION_BREAK`). `SWING_HOLD` ignores this when the model
+   edge has not also collapsed (`SWING_IGNORE_NOISE`).
+5. ≥ 1.5R reached + momentum weakening → `TAKE_PROFIT_PARTIAL` (~40%).
+6. `p_continue_5d` drop ≥ 0.08 → `REDUCE` 30%.
+   `p_drawdown_5d` rise ≥ 0.10 → `REDUCE` 30%.
+   Both at once → `REDUCE` 50%.
+7. ≥ 1R reached → annotate "move stop to break-even" while keeping
+   the action as `HOLD`.
+8. Otherwise → `HOLD`.
+
+### `evaluate_rotation(*, current_ticker, current_metrics, new_candidate_ticker, new_candidate_metrics, current_position_invalidated=False, available_capital=None, config=None)`
+
+Returns `PortfolioDecision` with both scores attached. Score formula:
+
+```
+score = 0.45 * p_continue_5d
+      + 0.30 * (1 - p_drawdown_5d)
+      + 0.20 * (1 - risk_score)
+      + 0.05 * setup_quality_score
+```
+
+| Situation | Action |
+|---|---|
+| Same ticker | `HOLD` (`SAME_TICKER`) |
+| Δ < `rotation_score_delta` (0.08) | `HOLD` (`DELTA_BELOW_THRESHOLD`) |
+| `current_position_invalidated=True` | `ROTATE` 100% (`CURRENT_INVALIDATED`) |
+| Δ ≥ `strong_rotation_score_delta` (0.15) | `ROTATE` 50–70% (`STRONG_BETTER`) |
+| Δ ≥ 0.08 (modest) | `ROTATE` 30–50% (`MODEST_BETTER`) |
+| Δ just barely ≥ 0.08 (< 0.10) | `ROTATE` 20% (`MINOR_BETTER`) |
+
+Full exits require `current_position_invalidated=True`. The engine
+never rotates 100% on a score difference alone.
+
+## Decision objects
 
 ```python
 @dataclass
 class ExecutionDecision:
     ticker: str
-    action: ExecutionAction  # WAIT, ENTER, SKIP, HOLD, REDUCE, EXIT, ROTATE, etc.
-    mode: TradeMode          # OPEN_ENTRY, CONFIRMED_RECLAIM, SWING_HOLD
-    confidence: float        # 0.0–1.0
-    
-    suggested_entry: Optional[float]              # Entry price
-    suggested_stop: Optional[float]               # Stop loss
-    suggested_take_profit: Optional[float]        # Primary target
-    conservative_take_profit: Optional[float]     # Conservative target
-    swing_take_profit: Optional[float]            # Multi-day target
-    
-    reduce_percent: Optional[float]               # For REDUCE actions (0.0–1.0)
-    rotate_to: Optional[str]                      # For ROTATE actions
-    invalidation_level: Optional[float]           # Thesis invalidation price
-    
-    reasons: list[DecisionReason]                 # Transparent decision tree
-    timestamp: dt.datetime                        # When decision was made
+    action: ExecutionAction
+    mode: Optional[TradeMode]
+    confidence: float                    # 0.0–1.0
+
+    suggested_entry: Optional[float]
+    suggested_stop: Optional[float]
+    suggested_take_profit: Optional[float]
+    conservative_take_profit: Optional[float]   # 2R
+    swing_take_profit: Optional[float]          # RiskLayer ATR target
+
+    reduce_percent: Optional[float]      # for REDUCE / TAKE_PROFIT_PARTIAL / ROTATE
+    rotate_to: Optional[str]             # for ROTATE
+    invalidation_level: Optional[float]
+
+    reasons: list[DecisionReason]
+    timestamp: dt.datetime
+
+@dataclass(frozen=True)
+class DecisionReason:
+    code: str       # stable identifier (e.g. "RECLAIM_HELD")
+    severity: Severity   # INFO / POSITIVE / WARNING / NEGATIVE / CRITICAL
+    message: str    # human-readable
 ```
 
-Each reason has:
-- **code** (str) — machine-readable identifier for branching (e.g., `"GAP_TOO_LARGE"`, `"STOP_HIT"`)
-- **severity** (Severity) — INFO, POSITIVE, WARNING, NEGATIVE, CRITICAL
-- **message** (str) — human-readable explanation
+`ExecutionAction` values: `WAIT`, `ENTER`, `SKIP`, `HOLD`, `REDUCE`,
+`EXIT`, `ROTATE`, `TAKE_PROFIT_PARTIAL`, `TAKE_PROFIT_FULL`.
 
----
+`TradeMode` values: `OPEN_ENTRY`, `CONFIRMED_RECLAIM`, `SWING_HOLD`.
 
-## Public API
+`decision.to_dict()` produces a JSON-safe payload — used by the
+`--json` flag on `scripts/run_entry_check.py` to write
+`data/execution_decisions/YYYY-MM-DD/{ticker}.json`.
 
-### 1. `evaluate_entry()` — Entry validation (0–30 min post-open)
+## Front-end script — three modes
 
-**Purpose:** Confirm whether a RiskLayer candidate should be entered at the current price/time.
+`scripts/run_entry_check.py` is the daily entry point.
 
-**Signature:**
-```python
-def evaluate_entry(
-    candidate: Mapping[str, Any],
-    *,
-    candles_1m: Sequence[Candle],
-    candles_5m: Optional[Sequence[Candle]] = None,
-    atr: float,
-    open_price: float,
-    prev_close: float,
-    latest_price: Optional[float] = None,
-    market_open: Optional[dt.datetime] = None,
-    config: Optional[ExecutionConfig] = None,
-) -> ExecutionDecision:
+```bash
+# Entry mode — pre/at-open candidate analysis (0–30 min entry timing).
+python3 scripts/run_entry_check.py --mode entry [--ticker SYM]
+
+# Manage mode — 15-minute check on an open paper position.
+python3 scripts/run_entry_check.py --mode manage \
+    --paper-position-file data/paper_positions/IWM.json
+
+# Portfolio mode — held position vs today's top RiskLayer candidate.
+python3 scripts/run_entry_check.py --mode portfolio \
+    --paper-position-file data/paper_positions/IWM.json
+
+# Add --json to also write the decision to
+# data/execution_decisions/YYYY-MM-DD/{ticker}.json
 ```
 
-**Inputs:**
+The legacy single-day check and `--backtest` paths are preserved
+(omit `--mode`).
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `candidate` | dict-like | Yes | RiskLayer output: `ticker`, `p_continue_5d`, `p_drawdown_5d`, `risk_score`, `setup_quality_score` |
-| `candles_1m` | list[Candle] | Yes | Intraday 1-minute bars (timestamp, open, high, low, close, volume) |
-| `candles_5m` | list[Candle] | No | Intraday 5-minute bars (optional, used for SMA/volume context) |
-| `atr` | float | Yes | Prior-session 14-day ATR (price units) |
-| `open_price` | float | Yes | Today's official market open price |
-| `prev_close` | float | Yes | Prior session's close price |
-| `latest_price` | float | No | Current price (defaults to last 1m candle close) |
-| `market_open` | datetime | No | Market open timestamp (defaults to first 1m candle timestamp) |
-| `config` | ExecutionConfig | No | Custom thresholds; uses defaults if None |
+## Paper-position JSON format
 
-**Returns:** `ExecutionDecision` with action = WAIT / ENTER / SKIP
+`--mode manage` and `--mode portfolio` both load an open position from
+a JSON file. Required keys are in **bold**.
 
-**Entry rule cascade** (top-to-bottom; first match stops evaluation):
-
-1. **Invalid ATR/prices** → SKIP (CRITICAL)
-2. **No intraday data yet** → WAIT (WARNING, come back in a few minutes)
-3. **Gap too large** (≥ 2.5x ATR) → SKIP (CRITICAL, model edge is gone)
-4. **Price moved too far from open** (> 1.5%) → SKIP (CRITICAL, missed the setup)
-5. **No reclaim of overnight structure** (if down open, body still below prev close) → SKIP (WARNING)
-6. **Volume + candle health** (SMA20 > SMA50 on 5m, healthy candle close) → advances confidence
-7. **Confidence math** (blend RiskLayer probs + intraday patterns) → confidence score
-
-If all rules pass and confidence ≥ threshold:
-- **Action:** ENTER
-- **Mode:** OPEN_ENTRY (for ATR-based stops) or CONFIRMED_RECLAIM (for structure stops)
-- **Targets:** 2–4 ATRs from entry (configurable)
-- **Stop:** 1 ATR below entry (or structure-based)
-
-**Example:**
-```python
-decision = evaluate_entry(
-    {"ticker": "NVDA", "p_continue_5d": 0.72, "risk_score": 0.25, "setup_quality_score": 0.8},
-    candles_1m=candles_1m,
-    candles_5m=candles_5m,
-    atr=2.3,
-    open_price=120.50,
-    prev_close=119.80,
-    latest_price=120.40,
-)
-
-for reason in decision.reasons:
-    print(f"  {reason.code:20s} [{reason.severity.value:8s}] {reason.message}")
-# Output example:
-#   OPEN_GAP          [INFO    ] Gap is 0.70 / 2.3 = 0.30x ATR (< 2.5); edge intact
-#   VOLUME_CHECK      [POSITIVE] 5m SMA20 > SMA50; volume healthy
-#   CONFIDENCE_OK     [POSITIVE] Confidence 0.68 (> 0.55 threshold); ready to enter
-```
-
----
-
-### 2. `manage_position()` — Position lifecycle (15-minute updates)
-
-**Purpose:** Given an open position, decide whether to HOLD, REDUCE, EXIT, or TAKE_PROFIT at each update.
-
-**Signature:**
-```python
-def manage_position(
-    position: OpenPosition,
-    *,
-    latest_price: float,
-    candles_15m: Optional[Sequence[Candle]] = None,
-    latest_metrics: Optional[Mapping[str, Any]] = None,
-    config: Optional[ExecutionConfig] = None,
-) -> ExecutionDecision:
-```
-
-**Inputs:**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `position` | OpenPosition | Snapshot of the open trade (entry, stop, target, mode, entry_metrics) |
-| `latest_price` | float | Current market price |
-| `candles_15m` | list[Candle] | Recent 15-minute bars (optional, for intraday structure) |
-| `latest_metrics` | dict | Updated RiskLayer metrics (optional, for edge decay detection) |
-| `config` | ExecutionConfig | Custom thresholds (optional) |
-
-**OpenPosition dataclass:**
-```python
-@dataclass
-class OpenPosition:
-    ticker: str
-    entry_price: float
-    shares: float
-    entry_time: dt.datetime
-    stop_loss: float
-    take_profit: float
-    mode: TradeMode = TradeMode.OPEN_ENTRY
-    invalidation_level: Optional[float] = None  # Price below which thesis dies
-    entry_metrics: Mapping[str, Any] = {}       # RiskLayer metrics at entry time
-    stop_at_breakeven: bool = False             # Already moved stop to breakeven
-    
-    @property
-    def initial_risk_per_share(self) -> float:
-        """Distance from entry to stop (always positive)."""
-        return max(self.entry_price - self.stop_loss, 0.0)
-    
-    def r_multiple(self, price: float) -> float:
-        """How many R the position is currently up/down."""
-        risk = self.initial_risk_per_share
-        return (price - self.entry_price) / risk if risk > 0 else 0.0
-```
-
-**Management rule cascade:**
-
-1. **Stop loss hit** → EXIT (CRITICAL)
-2. **Invalidation level breached** → EXIT (CRITICAL, thesis broken)
-3. **Edge decay detected** (new metrics significantly worse) → REDUCE or EXIT (WARNING/NEGATIVE)
-4. **Take profit tier 1 hit** (≥ +1.5R) → TAKE_PROFIT_PARTIAL (50% default)
-5. **Take profit tier 2 hit** (≥ +3.0R) → TAKE_PROFIT_FULL (100%)
-6. **Stop moved to breakeven** (optional, after +0.75R) → updates stop, HOLD
-7. **Otherwise** → HOLD with updated reasons
-
-**Returns:** `ExecutionDecision` with action = HOLD / REDUCE / EXIT / TAKE_PROFIT_PARTIAL / TAKE_PROFIT_FULL
-
-**Example:**
-```python
-position = OpenPosition(
-    ticker="NVDA",
-    entry_price=120.60,
-    shares=100,
-    entry_time=dt.datetime.now(dt.timezone.utc),
-    stop_loss=118.10,
-    take_profit=125.00,
-    mode=TradeMode.OPEN_ENTRY,
-    entry_metrics={"p_continue_5d": 0.72, "risk_score": 0.25},
-)
-
-# At current price 123.50
-decision = manage_position(position, latest_price=123.50)
-print(f"R multiple: {position.r_multiple(123.50):.2f}R")
-# R multiple: 1.22R (profit of 1.22x the risk)
-
-# If we also have new RiskLayer metrics showing edge decay:
-new_metrics = {"p_continue_5d": 0.52, "risk_score": 0.45}  # Degraded
-decision = manage_position(
-    position,
-    latest_price=123.50,
-    latest_metrics=new_metrics,
-)
-# decision.action might be REDUCE if metrics have decayed significantly
-```
-
----
-
-### 3. `evaluate_rotation()` — Portfolio rotation decision
-
-**Purpose:** Compare an open position against a new RiskLayer candidate and decide whether to ROTATE or HOLD.
-
-**Signature:**
-```python
-def evaluate_rotation(
-    current_position: OpenPosition,
-    candidate: Mapping[str, Any],
-    *,
-    latest_price: float,
-    invalidated: bool = False,
-    current_metrics: Optional[Mapping[str, Any]] = None,
-    config: Optional[ExecutionConfig] = None,
-) -> PortfolioDecision:
-```
-
-**Inputs:**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `current_position` | OpenPosition | The open position being evaluated |
-| `candidate` | dict | New RiskLayer output (ticker, p_continue_5d, p_drawdown_5d, risk_score, setup_quality_score) |
-| `latest_price` | float | Current price of the open position |
-| `invalidated` | bool | Whether the original thesis has broken (default False) |
-| `current_metrics` | dict | Optional RiskLayer metrics for the current position (for scoring) |
-| `config` | ExecutionConfig | Custom thresholds (optional) |
-
-**Returns:** `PortfolioDecision` with decision.action = ROTATE / HOLD
-
-**Scoring formula:**
-```
-candidate_score = 
-    0.45 * p_continue_5d 
-  + 0.30 * (1 - p_drawdown_5d) 
-  + 0.20 * (1 - risk_score) 
-  + 0.05 * setup_quality_score
-```
-
-Higher score = better candidate. Missing fields default to worst-case (0 for "good" metrics, 1 for "bad").
-
-**Rotation logic:**
-1. Compute score for current position (from entry_metrics)
-2. Compute score for new candidate
-3. Calculate delta: new_score - current_score
-4. Gate decisions:
-   - If invalidated AND new_score > current_score → **ROTATE** (exit old, enter new)
-   - If NOT invalidated AND delta > rotation_score_delta (default 0.05) → **ROTATE**
-   - If delta > strong_rotation_score_delta (default 0.15) → **ROTATE** (override invalidation)
-   - Otherwise → **HOLD** (keep current position)
-
-**Example:**
-```python
-position = OpenPosition(
-    ticker="NVDA",
-    entry_price=120.60,
-    shares=100,
-    entry_time=dt.datetime.now(dt.timezone.utc),
-    stop_loss=118.10,
-    take_profit=125.00,
-    entry_metrics={"p_continue_5d": 0.72, "p_drawdown_5d": 0.15, "risk_score": 0.25, "setup_quality_score": 0.8},
-)
-
-# New candidate appears
-new_candidate = {
-    "ticker": "TSLA",
-    "p_continue_5d": 0.85,
-    "p_drawdown_5d": 0.10,
+```json
+{
+  "ticker": "IWM",
+  "entry_price": 279.10,
+  "shares": 50,
+  "entry_time": "2026-05-01T13:42:00+00:00",
+  "stop_loss": 277.90,
+  "take_profit": 281.50,
+  "mode": "CONFIRMED_RECLAIM",
+  "invalidation_level": 278.20,
+  "stop_at_breakeven": false,
+  "entry_metrics": {
+    "p_continue_5d": 0.58,
+    "p_drawdown_5d": 0.27,
     "risk_score": 0.20,
-    "setup_quality_score": 0.9,
+    "setup_quality_score": 0.49
+  }
 }
-
-rotation = evaluate_rotation(position, new_candidate, latest_price=123.50)
-print(f"Current score: {rotation.current_score:.3f}")
-print(f"New score: {rotation.new_score:.3f}")
-print(f"Delta: {rotation.score_delta:.3f}")
-print(f"Action: {rotation.decision.action}")
-
-# Output example:
-# Current score: 0.524
-# New score: 0.654
-# Delta: 0.130
-# Action: ROTATE (delta > 0.05 threshold)
 ```
 
----
-
-## Configuration
-
-All thresholds are centralized in `ExecutionConfig` and can be overridden per-call.
-
-```python
-from risklayer.execution.config import get_config, ExecutionConfig
-
-# Load defaults
-cfg = get_config()
-
-# Access thresholds
-print(cfg.max_open_gap_atr)               # 2.5
-print(cfg.max_move_from_open_pct)         # 1.5
-print(cfg.rotation_score_delta)           # 0.05
-print(cfg.strong_rotation_score_delta)    # 0.15
-
-# Custom config
-custom_cfg = ExecutionConfig(
-    max_open_gap_atr=3.0,
-    max_move_from_open_pct=2.0,
-    take_profit_r_tiers=[1.5, 3.0, 5.0],
-)
-
-decision = evaluate_entry(..., config=custom_cfg)
-```
-
-**Key config fields:**
-
-| Field | Default | Meaning |
+| Field | Required | Notes |
 |---|---|---|
-| `max_open_gap_atr` | 2.5 | Max gap size (in ATRs) before SKIP |
-| `max_move_from_open_pct` | 1.5 | Max price move from open (%) before SKIP |
-| `require_reclaim` | True | Require overnight body reclaim before ENTER |
-| `atr_multiple_stop` | 1.0 | Stop placement: N × ATR below entry |
-| `take_profit_r_tiers` | [1.5, 3.0] | R-multiple thresholds for TAKE_PROFIT |
-| `take_profit_reduce_pct` | [0.5, 1.0] | Percent to reduce at each tier |
-| `rotation_score_delta` | 0.05 | Min score improvement to rotate (if not invalidated) |
-| `strong_rotation_score_delta` | 0.15 | Min score improvement to force rotation |
-| `score_w_p_continue` | 0.45 | Weight on p_continue_5d |
-| `score_w_drawdown` | 0.30 | Weight on (1 - p_drawdown_5d) |
-| `score_w_risk` | 0.20 | Weight on (1 - risk_score) |
-| `score_w_setup_quality` | 0.05 | Weight on setup_quality_score |
+| `ticker` | yes | Upper-cased on load |
+| `entry_price` | yes | Filled price per share |
+| `shares` | yes | Used for unrealized-PnL display |
+| `entry_time` | yes | ISO-8601 timestamp |
+| `stop_loss` | yes | If `latest_price <= stop_loss` → `EXIT` |
+| `take_profit` | yes | If `latest_price >= take_profit` → `TAKE_PROFIT_FULL` |
+| `mode` | optional | `OPEN_ENTRY` (default), `CONFIRMED_RECLAIM`, `SWING_HOLD` |
+| `invalidation_level` | optional | Defaults to `stop_loss` |
+| `stop_at_breakeven` | optional | Set to `true` after you've moved your stop |
+| `entry_metrics` | optional but strongly recommended | RiskLayer metrics at entry — required to detect `REDUCE` triggers |
 
----
+There is no broker call. To "execute" the recommendation you act
+manually (paper or real) and update the JSON: e.g. set
+`stop_at_breakeven: true` after moving your stop, raise `stop_loss`
+after a partial take-profit, or delete the file once you're flat.
 
-## Data structures
+## Configurable thresholds
 
-### Candle
+All defaults live in [`config.py`](./config.py).
+
+| Threshold | Default | Used by |
+|---|---|---|
+| `open_noise_minutes` | 5 | Entry — first-N-minutes WAIT |
+| `entry_window_minutes` | 30 | Entry — flag decisions outside this window |
+| `max_open_gap_atr` | **0.8** | Entry — gap-vs-ATR SKIP cutoff |
+| `max_current_extension_atr` | **0.8** | Entry — extension-vs-ATR cutoff |
+| `reclaim_hold_candles` | 2 | Entry — closes above reclaim level |
+| `reclaim_max_upper_wick_ratio` | 0.55 | Entry — wick rejection sensitivity |
+| `reclaim_max_extension_atr` | 0.5 | Entry — max extension above open for reclaim |
+| `reduce_p_continue_drop` | 0.08 | Manage — `REDUCE` on edge decay |
+| `reduce_drawdown_rise` | 0.10 | Manage — `REDUCE` on rising drawdown risk |
+| `reduce_single_percent` | 0.30 | Manage — single-trigger reduce size |
+| `reduce_combined_percent` | 0.50 | Manage — both triggers reduce size |
+| `weak_p_continue_threshold` | 0.52 | Manage — standalone weak-edge cutoff |
+| `weak_drawdown_threshold` | 0.35 | Manage — standalone weak-edge cutoff |
+| `exit_p_continue_threshold` | 0.50 | Manage — EXIT when paired with drawdown |
+| `exit_drawdown_threshold` | 0.40 | Manage — EXIT when paired with `p_continue` |
+| `breakeven_r_multiple` | 1.0 | Manage — annotate move-stop-to-BE |
+| `partial_tp_r_multiple` | 1.5 | Manage — `TAKE_PROFIT_PARTIAL` allowed |
+| `partial_tp_size` | 0.40 | Manage — partial size (40%) |
+| `score_w_p_continue` | 0.45 | Portfolio — score weight |
+| `score_w_drawdown` | 0.30 | Portfolio — score weight |
+| `score_w_risk` | 0.20 | Portfolio — score weight |
+| `score_w_setup_quality` | 0.05 | Portfolio — score weight |
+| `rotation_score_delta` | 0.08 | Portfolio — minimum Δ to rotate |
+| `strong_rotation_score_delta` | 0.15 | Portfolio — Δ for 50–70% rotate |
+
+Override per-call:
 
 ```python
-@dataclass
+from risklayer.execution.config import DEFAULT_CONFIG
+
+cfg = DEFAULT_CONFIG.with_overrides(
+    max_open_gap_atr=0.6,        # tighter gap rejection
+    reduce_p_continue_drop=0.10, # less sensitive REDUCE
+)
+decision = evaluate_entry(candidate, ..., config=cfg)
+```
+
+## Data structures (`_candles.py`)
+
+```python
+@dataclass(frozen=True)
 class Candle:
     timestamp: dt.datetime
     open: float
     high: float
     low: float
     close: float
-    volume: int  # Can be 0 for synthetic candles
+    volume: float = 0.0
 ```
 
-### TradeMode
+`to_candles(df)` converts a pandas DataFrame (Open/High/Low/Close/Volume +
+DatetimeIndex) to `list[Candle]` — the only place we touch pandas in
+the engine, so the rule modules stay easy to unit-test with synthetic
+candles.
 
-```python
-class TradeMode(str, Enum):
-    OPEN_ENTRY = "OPEN_ENTRY"              # Entered at open, ATR-based stop
-    CONFIRMED_RECLAIM = "CONFIRMED_RECLAIM"  # Entered after reclaim, structure stop
-    SWING_HOLD = "SWING_HOLD"              # Multi-day, ignore intraday noise
+## Tests
+
+```bash
+pytest -q app/tests/test_execution_engine.py
 ```
 
-### ExecutionAction
+22 tests cover every entry / manage / portfolio scenario from the
+spec. No DB, no network, no yfinance — all candles are synthesized in
+the tests.
 
-```python
-class ExecutionAction(str, Enum):
-    WAIT = "WAIT"                          # Come back later (intraday only)
-    ENTER = "ENTER"                        # Entry is valid, execute now
-    SKIP = "SKIP"                          # Don't enter this candidate today
-    HOLD = "HOLD"                          # Position is good, keep holding
-    REDUCE = "REDUCE"                      # Trim position (specify reduce_percent)
-    EXIT = "EXIT"                          # Close full position
-    ROTATE = "ROTATE"                      # Exit old, enter new (specify rotate_to)
-    TAKE_PROFIT_PARTIAL = "TAKE_PROFIT_PARTIAL"  # Hit target, take 50% off
-    TAKE_PROFIT_FULL = "TAKE_PROFIT_FULL"        # Hit full target, close position
-```
+## Out of scope (intentionally)
 
-### Severity
-
-```python
-class Severity(str, Enum):
-    INFO = "INFO"                   # Informational (e.g., "No data yet")
-    POSITIVE = "POSITIVE"          # Supports the action
-    WARNING = "WARNING"            # Cautionary but not decisive
-    NEGATIVE = "NEGATIVE"          # Works against the action
-    CRITICAL = "CRITICAL"          # Dominates the action (e.g., stop hit)
-```
-
----
-
-## Integration patterns
-
-### Daily trading loop
-
-```python
-import datetime as dt
-from risklayer.execution import evaluate_entry, manage_position
-
-# 9:30 AM: Evaluate candidates
-for candidate in today_risklayer_candidates:
-    decision = evaluate_entry(
-        candidate,
-        candles_1m=fetch_1m_candles(candidate['ticker']),
-        atr=compute_atr(candidate['ticker']),
-        open_price=get_open(candidate['ticker']),
-        prev_close=get_prev_close(candidate['ticker']),
-    )
-    
-    if decision.action == ExecutionAction.ENTER:
-        position = execute_entry(candidate['ticker'], decision)
-        store_position(position)
-
-# 10:00 AM, 10:15 AM, ... 3:45 PM: Manage open positions
-for position in active_positions:
-    decision = manage_position(
-        position,
-        latest_price=get_latest_price(position.ticker),
-        candles_15m=fetch_15m_candles(position.ticker),
-        latest_metrics=get_latest_risklayer_metrics(position.ticker),
-    )
-    
-    execute_management_action(decision)
-    update_position_state(position, decision)
-
-# 4:00 PM: Check rotations before close
-for position in active_positions:
-    best_new_candidate = find_next_best_candidate(position.ticker)
-    rotation = evaluate_rotation(position, best_new_candidate, latest_price=...)
-    
-    if rotation.decision.action == ExecutionAction.ROTATE:
-        exit_and_rotate(position, rotation.decision)
-```
-
----
-
-## Testing
-
-```python
-import pytest
-from risklayer.execution import evaluate_entry, ExecutionAction, Candle
-
-def test_enter_clean_setup():
-    """Test a clean entry scenario."""
-    candles_1m = [
-        Candle(dt.datetime(...), 120.0, 120.5, 119.9, 120.3, 100000),
-        # ... more candles
-    ]
-    
-    decision = evaluate_entry(
-        {"ticker": "NVDA", "p_continue_5d": 0.72, "risk_score": 0.3},
-        candles_1m=candles_1m,
-        atr=2.0,
-        open_price=120.0,
-        prev_close=119.5,
-    )
-    
-    assert decision.action == ExecutionAction.ENTER
-    assert decision.suggested_stop < decision.suggested_entry
-    assert len(decision.reasons) > 0
-
-def test_skip_on_large_gap():
-    """Test that large gaps trigger SKIP."""
-    decision = evaluate_entry(
-        {"ticker": "NVDA", "p_continue_5d": 0.72},
-        candles_1m=[...],
-        atr=2.0,
-        open_price=125.0,  # Gap too large
-        prev_close=119.5,
-    )
-    
-    assert decision.action == ExecutionAction.SKIP
-    gap_reason = [r for r in decision.reasons if r.code == "GAP_TOO_LARGE"]
-    assert len(gap_reason) == 1
-```
-
----
-
-## Error handling
-
-All functions degrade gracefully:
-- Missing `p_continue_5d` → treated as 0.0 (worst-case)
-- Missing `risk_score` → treated as 1.0 (worst-case)
-- Empty `candles_1m` → action = WAIT (not ERROR)
-- Non-positive ATR → action = SKIP (not ERROR)
-
-No exceptions are raised during normal operation. All decision-making happens via the reason chain.
-
----
-
-## Serialization
-
-All decisions can be serialized to JSON:
-
-```python
-decision = evaluate_entry(...)
-json_dict = decision.to_dict()
-json_str = json.dumps(json_dict, indent=2)
-
-# Output example:
-# {
-#   "ticker": "NVDA",
-#   "action": "ENTER",
-#   "mode": "OPEN_ENTRY",
-#   "confidence": 0.6823,
-#   "suggested_entry": 120.50,
-#   "suggested_stop": 118.10,
-#   "suggested_take_profit": 125.00,
-#   "reasons": [
-#     {
-#       "code": "OPEN_GAP",
-#       "severity": "INFO",
-#       "message": "Gap is 0.30x ATR; edge intact"
-#     },
-#     ...
-#   ],
-#   "timestamp": "2026-05-01T14:30:00+00:00"
-# }
-```
-
----
-
-## FAQ
-
-**Q: Can I use custom stop / target logic?**  
-A: Not yet. The engine is deterministic and rule-based by design. If you need different stop/target math, override `config` thresholds or extend the decision post-call (the engine provides the base decision; you can adjust if needed).
-
-**Q: What if my broker fills at a different price than suggested?**  
-A: The `suggested_entry` / `suggested_stop` are guidelines. Log the actual filled price and create a new `OpenPosition` with that price; the `manage_position()` call uses whatever current price you pass.
-
-**Q: Can I run `manage_position()` more than every 15 minutes?**  
-A: Yes. The function is idempotent given the same inputs. You can run it every minute or every hour — it will produce consistent decisions based on the latest price and candles you provide.
-
-**Q: How do I handle gaps down overnight?**  
-A: `manage_position()` will immediately hit the stop if latest_price ≤ stop_loss, returning EXIT with severity CRITICAL.
-
-**Q: Can I override a SKIP decision?**  
-A: The engine never forces you to follow its decision — it's a recommendation. If you have additional context, you can override it, but you lose the deterministic transparency advantage.
-
----
-
-## See also
-
-- **CLAUDE.md** — Project context and quirks
-- **app/classification/mapper.py** — How RiskLayer probabilities → classification
-- **app/models/inference/** — Model predictions and calibration
-- **tests/** — Full test suite with many usage examples
+- Placing broker orders or transferring funds. **Advisory only.**
+- LLM-driven trade invention or veto.
+- Portfolio-level optimization (sizing, correlation, drawdown caps
+  across positions). Single-position discipline only.
+- Re-ranking or re-classifying candidates — that is RiskLayer's job
+  (`app/services/ranking_service.py`,
+  `app/classification/mapper.py`). The engine consumes RiskLayer's
+  output and decides timing / exit only.
