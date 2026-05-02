@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     wf_train_years: int = 3
     wf_test_months: int = 3
     # Embargo: exclude this many days before each test fold to prevent label leakage.
-    # Lopez de Prado recommends horizon_long as minimum; 7 days is a conservative default.
-    wf_embargo_days: int = 7
+    # Lopez de Prado recommends horizon_long as minimum; 5 days matches the longest current continuation label horizon.
+    wf_embargo_days: int = 5
 
     # ── Classification mapper ─────────────────────────────────────────────────
     strong_cont_threshold: float = 0.65
