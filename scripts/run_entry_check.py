@@ -2,18 +2,19 @@
 """
 scripts/run_entry_check.py
 
-Morning entry check OR rolling backtest with real-data comparison.
+RiskLayer execution-engine front-end.
+
+This script can run in three families of modes:
 
 ────────────────────────────────────────────────────────────────────────────
-SINGLE-DAY MODE  (default)
+LEGACY MODES  (unchanged behaviour — call without --mode)
 ────────────────────────────────────────────────────────────────────────────
-    python scripts/run_entry_check.py                    # uses today
+SINGLE-DAY  (default)
+    python scripts/run_entry_check.py                    # uses latest date with predictions
     python scripts/run_entry_check.py --date 2024-11-15  # specific past day
     python scripts/run_entry_check.py --fee 0.10         # with fee
 
-────────────────────────────────────────────────────────────────────────────
-BACKTEST MODE
-────────────────────────────────────────────────────────────────────────────
+BACKTEST
     python scripts/run_entry_check.py --backtest
     python scripts/run_entry_check.py --backtest --days 30 --fee 0.10
 
@@ -21,6 +22,25 @@ BACKTEST MODE
     --fee F       Round-trip transaction cost as a % of trade value
                   (e.g. --fee 0.10 deducts 0.10% per completed trade,
                   covering both entry + exit combined).  Default: 0.0
+
+────────────────────────────────────────────────────────────────────────────
+EXECUTION-ENGINE MODES  (rule-based, structured decisions)
+────────────────────────────────────────────────────────────────────────────
+ENTRY        — pre/at-open candidate analysis (0–30 min entry timing)
+    python scripts/run_entry_check.py --mode entry
+    python scripts/run_entry_check.py --mode entry --ticker IWM
+
+MANAGE       — 15-min check on an open paper position
+    python scripts/run_entry_check.py --mode manage \
+        --paper-position-file data/paper_positions/XLY.json
+
+PORTFOLIO    — compare current paper position with today's top RiskLayer pick
+    python scripts/run_entry_check.py --mode portfolio \
+        --paper-position-file data/paper_positions/XLY.json
+
+Optional flags shared by execution-engine modes:
+    --json                          also write a machine-readable decision file to
+                                    data/execution_decisions/YYYY-MM-DD/{ticker}.json
 
 ────────────────────────────────────────────────────────────────────────────
 BACKTEST SIMULATION RULES
@@ -42,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -57,6 +78,33 @@ from app.core.market_calendar import (
 )
 from app.db.session import get_db
 from app.services.ranking_service import get_top_continuation
+
+# ── Execution-engine imports (new modes) ───────────────────────────────────
+from risklayer.execution import (
+    ExecutionAction,
+    ExecutionDecision,
+    PortfolioDecision,
+    Severity,
+    TradeMode,
+    candidate_score,
+    evaluate_entry,
+    evaluate_rotation,
+    manage_position,
+)
+from risklayer.execution._candles import to_candles
+from risklayer.execution.config import DEFAULT_CONFIG
+from risklayer.execution.position_manager import OpenPosition
+
+
+def _latest_prediction_date() -> dt.date:
+    """Return the most recent date that has prediction rows in the DB.
+
+    Falls back to last_closed_trading_day() if the table is empty (e.g. first
+    run before any daily pipeline has executed).
+    """
+    with get_db() as db:
+        row = db.query(DailyPrediction.date).order_by(DailyPrediction.date.desc()).first()
+    return row.date if row else last_closed_trading_day()
 
 # ── ANSI colours ───────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
@@ -577,11 +625,415 @@ def run_single_day(prediction_date: dt.date, fee_pct: float, min_p_continue: flo
     print()
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Execution-engine modes (new): entry / manage / portfolio
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _severity_color(sev: str) -> str:
+    """Map a Severity value to an ANSI color code for printing."""
+    return {
+        "POSITIVE": GREEN,
+        "INFO":     CYAN,
+        "WARNING":  YELLOW,
+        "NEGATIVE": RED,
+        "CRITICAL": RED + BOLD,
+    }.get(sev, "")
+
+
+def _severity_glyph(sev: str) -> str:
+    return {
+        "POSITIVE": "+",
+        "INFO":     " ",
+        "WARNING":  "·",
+        "NEGATIVE": "-",
+        "CRITICAL": "!",
+    }.get(sev, "·")
+
+
+def _print_decision_banner(title: str, ticker: str) -> None:
+    bar = "=" * 72
+    print()
+    print(bar)
+    print(f"  {BOLD}{title} — {ticker}{RESET}")
+    print(bar)
+
+
+def _print_reasons(decision: ExecutionDecision) -> None:
+    if not decision.reasons:
+        return
+    print("Reasons:")
+    for r in decision.reasons:
+        color = _severity_color(r.severity.value if hasattr(r.severity, "value") else str(r.severity))
+        glyph = _severity_glyph(r.severity.value if hasattr(r.severity, "value") else str(r.severity))
+        print(f"  {color}{glyph} {r.message}{RESET}")
+
+
+def _candidate_metrics_view(c: dict) -> None:
+    """Print the RiskLayer metrics for a candidate."""
+    print("Candidate:")
+    print(f"  p_continue_5d : {fmt(c.get('p_continue_5d'))}")
+    print(f"  p_drawdown_5d : {fmt(c.get('p_drawdown_5d'))}")
+    print(f"  risk_score    : {fmt(c.get('risk_score'))}")
+    print(f"  setup_quality : {fmt(c.get('setup_quality_score') or c.get('setup_quality'))}")
+
+
+def _maybe_save_decision_json(
+    decision_payload: dict,
+    *,
+    ticker: str,
+    enable: bool,
+    decision_date: Optional[dt.date] = None,
+) -> Optional[Path]:
+    """Persist *decision_payload* to data/execution_decisions/YYYY-MM-DD/{ticker}.json."""
+    if not enable:
+        return None
+    target_date = decision_date or dt.date.today()
+    out_dir = (
+        Path(__file__).parent.parent
+        / DEFAULT_CONFIG.decisions_log_dir
+        / target_date.isoformat()
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{ticker}.json"
+    with out_path.open("w") as f:
+        json.dump(decision_payload, f, indent=2, default=str)
+    return out_path
+
+
+def _resolve_candidate(
+    *,
+    ticker_override: Optional[str],
+    prediction_date: dt.date,
+    min_p_continue: float,
+) -> Optional[dict]:
+    """Get a RiskLayer candidate either by ticker or by top-continuation rank."""
+    with get_db() as db:
+        candidates = get_top_continuation(
+            prediction_date, db, limit=20, min_p_continue=min_p_continue
+        )
+    if not candidates:
+        return None
+    if ticker_override:
+        for c in candidates:
+            if c["ticker"].upper() == ticker_override.upper():
+                return c
+        # No match — return None so caller can warn the user.
+        return None
+    return candidates[0]
+
+
+def _fetch_intraday_split(ticker: str) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """Fetch 1m and 5m intraday data; return (None, None) on failure."""
+    try:
+        df1 = yf.download(ticker, period="1d", interval="1m", progress=False, auto_adjust=False)
+    except Exception as e:
+        print(f"  {YELLOW}⚠ 1m fetch failed for {ticker}: {e}{RESET}")
+        df1 = None
+    try:
+        df5 = yf.download(ticker, period="5d", interval="5m", progress=False, auto_adjust=False)
+    except Exception as e:
+        print(f"  {YELLOW}⚠ 5m fetch failed for {ticker}: {e}{RESET}")
+        df5 = None
+
+    for df in (df1, df5):
+        if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+    return df1, df5
+
+
+def run_mode_entry(
+    *,
+    ticker_override: Optional[str],
+    prediction_date: dt.date,
+    min_p_continue: float,
+    json_output: bool,
+) -> None:
+    """Pre/at-open candidate analysis using risklayer.execution.entry_evaluator."""
+    candidate = _resolve_candidate(
+        ticker_override=ticker_override,
+        prediction_date=prediction_date,
+        min_p_continue=min_p_continue,
+    )
+    if candidate is None:
+        msg = (
+            f"No RiskLayer candidate found for {prediction_date}"
+            + (f" matching --ticker {ticker_override}" if ticker_override else "")
+        )
+        print(f"\n  {YELLOW}⚠ {msg}{RESET}\n")
+        return
+
+    ticker = candidate["ticker"]
+    _print_decision_banner("RISKLAYER EXECUTION DECISION", ticker)
+    _candidate_metrics_view(candidate)
+
+    print("\nFetching intraday data...")
+    daily = download_daily(ticker, period="3mo")
+    df1, df5 = _fetch_intraday_split(ticker)
+
+    if df1 is None or df1.empty:
+        print(f"  {RED}[ERROR]{RESET} No 1m data available; cannot evaluate entry.")
+        return
+
+    # Previous session row (excluding today if today is in the daily index).
+    today_iso = dt.date.today().isoformat()
+    daily_dates = [str(d)[:10] for d in daily.index]
+    prev_row = daily.iloc[-2] if daily_dates and daily_dates[-1] == today_iso else daily.iloc[-1]
+    prev_close = float(prev_row["Close"])
+    atr = float(prev_row["atr"])
+
+    today_open = float(df1["Open"].dropna().iloc[0])
+    latest_price = float(df1["Close"].dropna().iloc[-1])
+
+    candles_1m = to_candles(df1)
+    candles_5m = to_candles(df5) if df5 is not None and not df5.empty else None
+
+    print("Entry context:")
+    print(f"  open          : {today_open:.2f}")
+    print(f"  latest        : {latest_price:.2f}")
+    print(f"  ATR           : {atr:.2f}")
+    if atr > 0:
+        print(f"  open_gap_atr  : {abs(today_open - prev_close) / atr:.2f}x")
+        print(f"  current_atr   : {abs(latest_price - today_open) / atr:.2f}x")
+
+    decision = evaluate_entry(
+        candidate,
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        atr=atr,
+        open_price=today_open,
+        prev_close=prev_close,
+        latest_price=latest_price,
+    )
+
+    print("\nDecision:")
+    print(f"  ACTION     : {BOLD}{decision.action.value}{RESET}")
+    print(f"  MODE       : {decision.mode.value if decision.mode else '—'}")
+    print(f"  CONFIDENCE : {decision.confidence:.2f}")
+    if decision.suggested_entry is not None:
+        print("Suggested trade:")
+        print(f"  entry           : {decision.suggested_entry:.2f}")
+        print(f"  stop            : {decision.suggested_stop:.2f}")
+        if decision.conservative_take_profit is not None:
+            print(f"  conservative TP : {decision.conservative_take_profit:.2f}")
+        if decision.swing_take_profit is not None:
+            print(f"  swing TP        : {decision.swing_take_profit:.2f}")
+    print()
+    _print_reasons(decision)
+    print("=" * 72)
+
+    saved = _maybe_save_decision_json(
+        decision.to_dict(), ticker=ticker, enable=json_output, decision_date=prediction_date,
+    )
+    if saved:
+        print(f"\n  Decision JSON saved to: {saved}")
+
+
+def _load_paper_position(path: Path) -> OpenPosition:
+    """Read an open position from a JSON file.
+
+    Required keys:  ticker, entry_price, shares, entry_time (ISO), stop_loss, take_profit
+    Optional keys:  mode, invalidation_level, entry_metrics (object), stop_at_breakeven
+    """
+    with path.open("r") as f:
+        raw = json.load(f)
+
+    mode_str = (raw.get("mode") or "OPEN_ENTRY").upper()
+    try:
+        mode = TradeMode[mode_str]
+    except KeyError:
+        mode = TradeMode.OPEN_ENTRY
+
+    entry_time_raw = raw.get("entry_time")
+    if isinstance(entry_time_raw, str):
+        entry_time = dt.datetime.fromisoformat(entry_time_raw)
+    elif entry_time_raw is None:
+        entry_time = dt.datetime.now(dt.timezone.utc)
+    else:
+        entry_time = entry_time_raw
+
+    return OpenPosition(
+        ticker=str(raw["ticker"]).upper(),
+        entry_price=float(raw["entry_price"]),
+        shares=float(raw["shares"]),
+        entry_time=entry_time,
+        stop_loss=float(raw["stop_loss"]),
+        take_profit=float(raw["take_profit"]),
+        mode=mode,
+        invalidation_level=raw.get("invalidation_level"),
+        entry_metrics=raw.get("entry_metrics") or {},
+        stop_at_breakeven=bool(raw.get("stop_at_breakeven", False)),
+    )
+
+
+def _latest_metrics_for(ticker: str, prediction_date: dt.date) -> Optional[dict]:
+    """Look up the latest RiskLayer metrics for *ticker* on *prediction_date*."""
+    with get_db() as db:
+        board = get_top_continuation(prediction_date, db, limit=200, min_p_continue=0.0)
+    for row in board:
+        if row["ticker"].upper() == ticker.upper():
+            return row
+    return None
+
+
+def run_mode_manage(
+    *,
+    paper_position_file: Optional[str],
+    prediction_date: dt.date,
+    json_output: bool,
+) -> None:
+    """15-minute position management for an open paper position."""
+    if not paper_position_file:
+        print(f"\n  {RED}[ERROR]{RESET} --mode manage requires --paper-position-file.\n")
+        return
+
+    pos_path = Path(paper_position_file).expanduser().resolve()
+    if not pos_path.exists():
+        print(f"\n  {RED}[ERROR]{RESET} Paper position file not found: {pos_path}\n")
+        return
+
+    position = _load_paper_position(pos_path)
+    _print_decision_banner("RISKLAYER POSITION MANAGEMENT", position.ticker)
+
+    df1, _ = _fetch_intraday_split(position.ticker)
+    if df1 is None or df1.empty:
+        print(f"  {RED}[ERROR]{RESET} No 1m data available; cannot evaluate position.")
+        return
+
+    latest_price = float(df1["Close"].dropna().iloc[-1])
+
+    # Resample 1m → 15m so we don't need to fetch a separate feed.
+    df15 = (
+        df1[["Open", "High", "Low", "Close", "Volume"]]
+        .resample("15min")
+        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+        .dropna()
+    )
+    candles_15m = to_candles(df15) if not df15.empty else None
+
+    latest_metrics = _latest_metrics_for(position.ticker, prediction_date)
+
+    pnl_per_share = latest_price - position.entry_price
+    pnl_pct = pnl_per_share / position.entry_price * 100 if position.entry_price else 0.0
+    pnl_total = pnl_per_share * position.shares
+
+    print("Position:")
+    print(f"  entry        : {position.entry_price:.2f}")
+    print(f"  latest       : {latest_price:.2f}")
+    print(f"  shares       : {position.shares:g}")
+    pnl_color = GREEN if pnl_total >= 0 else RED
+    print(f"  unrealized   : {pnl_color}{pnl_total:+.2f} ({pnl_pct:+.2f}%){RESET}")
+
+    if latest_metrics:
+        print("Updated RiskLayer:")
+        print(f"  p_continue_5d : {fmt(latest_metrics.get('p_continue_5d'))}")
+        print(f"  p_drawdown_5d : {fmt(latest_metrics.get('p_drawdown_5d'))}")
+        print(f"  risk_score    : {fmt(latest_metrics.get('risk_score'))}")
+    else:
+        print(f"  {YELLOW}(No fresh RiskLayer metrics found for {position.ticker} on {prediction_date}){RESET}")
+
+    decision = manage_position(
+        position,
+        latest_price=latest_price,
+        candles_15m=candles_15m,
+        latest_metrics=latest_metrics,
+    )
+
+    print("\nDecision:")
+    print(f"  ACTION : {BOLD}{decision.action.value}{RESET}")
+    if decision.reduce_percent is not None:
+        print(f"  REDUCE : {decision.reduce_percent * 100:.0f}%")
+    if decision.suggested_stop is not None:
+        print(f"  Move stop to : {decision.suggested_stop:.2f}")
+    print()
+    _print_reasons(decision)
+    print("=" * 72)
+
+    saved = _maybe_save_decision_json(
+        decision.to_dict(),
+        ticker=position.ticker,
+        enable=json_output,
+        decision_date=prediction_date,
+    )
+    if saved:
+        print(f"\n  Decision JSON saved to: {saved}")
+
+
+def run_mode_portfolio(
+    *,
+    paper_position_file: Optional[str],
+    prediction_date: dt.date,
+    min_p_continue: float,
+    json_output: bool,
+) -> None:
+    """Compare the open paper position to today's top RiskLayer candidate."""
+    if not paper_position_file:
+        print(f"\n  {RED}[ERROR]{RESET} --mode portfolio requires --paper-position-file.\n")
+        return
+
+    pos_path = Path(paper_position_file).expanduser().resolve()
+    if not pos_path.exists():
+        print(f"\n  {RED}[ERROR]{RESET} Paper position file not found: {pos_path}\n")
+        return
+
+    position = _load_paper_position(pos_path)
+    new_top = _resolve_candidate(
+        ticker_override=None,
+        prediction_date=prediction_date,
+        min_p_continue=min_p_continue,
+    )
+    if new_top is None:
+        print(f"\n  {YELLOW}⚠ No RiskLayer candidate for {prediction_date} — keep current position.{RESET}\n")
+        return
+
+    current_metrics = _latest_metrics_for(position.ticker, prediction_date) or position.entry_metrics or {}
+
+    _print_decision_banner("RISKLAYER PORTFOLIO ROTATION CHECK", position.ticker)
+    print(f"Current position : {position.ticker}")
+    _candidate_metrics_view(current_metrics)
+    print(f"\nNew top candidate: {new_top['ticker']}")
+    _candidate_metrics_view(new_top)
+
+    portfolio_decision: PortfolioDecision = evaluate_rotation(
+        current_ticker=position.ticker,
+        current_metrics=current_metrics,
+        new_candidate_ticker=new_top["ticker"],
+        new_candidate_metrics=new_top,
+    )
+    decision = portfolio_decision.decision
+
+    print("\nScores:")
+    print(f"  current : {portfolio_decision.current_score:.3f}")
+    print(f"  new     : {portfolio_decision.new_score:.3f}")
+    print(f"  delta   : {portfolio_decision.score_delta:+.3f}")
+    print("\nDecision:")
+    print(f"  ACTION    : {BOLD}{decision.action.value}{RESET}")
+    if decision.rotate_to:
+        print(f"  ROTATE TO : {decision.rotate_to}")
+    if decision.reduce_percent is not None:
+        print(f"  REDUCE    : {decision.reduce_percent * 100:.0f}%")
+    print()
+    _print_reasons(decision)
+    print("=" * 72)
+
+    saved = _maybe_save_decision_json(
+        portfolio_decision.to_dict(),
+        ticker=f"{position.ticker}_vs_{new_top['ticker']}",
+        enable=json_output,
+        decision_date=prediction_date,
+    )
+    if saved:
+        print(f"\n  Portfolio decision JSON saved to: {saved}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Entry check (single-day or backtest mode)"
+        description="Entry check / execution engine (legacy single-day, backtest, "
+                    "or new --mode entry|manage|portfolio)"
     )
     parser.add_argument(
         "--date",
@@ -619,19 +1071,64 @@ def main() -> None:
             "Default: 0.45.  Pass 0.0 to disable the filter entirely."
         ),
     )
+    # ── Execution-engine flags ────────────────────────────────────────
+    parser.add_argument(
+        "--mode",
+        choices=("entry", "manage", "portfolio"),
+        help="Execution-engine mode.  Omit to run the legacy single-day or backtest path.",
+    )
+    parser.add_argument(
+        "--ticker",
+        help="(--mode entry) Pin the candidate to a specific ticker instead of the top one.",
+    )
+    parser.add_argument(
+        "--paper-position-file",
+        help="(--mode manage|portfolio) JSON file describing the open paper position.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Also write the decision to data/execution_decisions/YYYY-MM-DD/{ticker}.json",
+    )
     args = parser.parse_args()
 
     fee_pct        = args.fee       # e.g. 0.10 means 0.10%
     min_p_continue = args.min_prob  # e.g. 0.35, or 0.0 to disable
 
+    prediction_date = (
+        dt.date.fromisoformat(args.date) if args.date else _latest_prediction_date()
+    )
+
+    if args.mode == "entry":
+        run_mode_entry(
+            ticker_override=args.ticker,
+            prediction_date=prediction_date,
+            min_p_continue=min_p_continue,
+            json_output=args.json,
+        )
+        return
+
+    if args.mode == "manage":
+        run_mode_manage(
+            paper_position_file=args.paper_position_file,
+            prediction_date=prediction_date,
+            json_output=args.json,
+        )
+        return
+
+    if args.mode == "portfolio":
+        run_mode_portfolio(
+            paper_position_file=args.paper_position_file,
+            prediction_date=prediction_date,
+            min_p_continue=min_p_continue,
+            json_output=args.json,
+        )
+        return
+
+    # ── Legacy paths (unchanged) ──────────────────────────────────────
     if args.backtest:
         run_backtest(days=args.days, fee_pct=fee_pct, min_p_continue=min_p_continue)
     else:
-        prediction_date = (
-            dt.date.fromisoformat(args.date)
-            if args.date
-            else dt.date.today()
-        )
         run_single_day(prediction_date=prediction_date, fee_pct=fee_pct, min_p_continue=min_p_continue)
 
 

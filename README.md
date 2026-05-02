@@ -39,6 +39,14 @@ movecred/
 │   ├── jobs/             daily_ingest, daily_predict, daily_digest, weekly_eval, backfill
 │   ├── services/         stock_analysis, ranking, digest, outcome tracking
 │   └── tests/
+├── risklayer/
+│   └── execution/        rule-based intraday execution engine
+│       ├── entry_evaluator.py      WAIT / ENTER / SKIP decisions
+│       ├── position_manager.py      HOLD / REDUCE / EXIT / TAKE_PROFIT decisions
+│       ├── portfolio_allocator.py   ROTATE / HOLD decisions
+│       ├── decision_types.py        ExecutionDecision, ExecutionAction, TradeMode
+│       ├── config.py                threshold configuration
+│       └── _candles.py              Candle utilities
 ├── scripts/              run_backfill, run_train_all, run_daily, run_entry_check, run_week_validation
 └── docs/
 ```
@@ -294,12 +302,21 @@ Tests cover:
 
 ---
 
-## Explicitly out of scope for V1
+## V2 additions
 
-- Intraday mode
+- [x] **Intraday execution layer** (`risklayer.execution`) — rule-based WHEN/HOW decisions
+  - Entry evaluation (0–30min post-open)
+  - Position management (15-minute updates with stop/target logic)
+  - Portfolio rotation (compare open positions to new candidates)
+  - All decisions deterministic, threshold-driven, fully transparent with reasons
+
+---
+
+## Explicitly out of scope
+
 - News / NLP ingestion
 - Options activity context
-- LLM-generated interpretations
-- Portfolio-level layer
+- LLM-generated interpretations for trade decisions
+- Portfolio-level optimization
 - Mobile app
-- Broker integrations
+- Broker integrations (handle externally)
