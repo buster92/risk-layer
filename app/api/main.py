@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from app.api.routes import health, stocks, admin, alerts
 from app.core.config import get_settings
@@ -98,6 +99,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Root ──────────────────────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirect browsers to the interactive API docs."""
+    return RedirectResponse(url="/docs")
+
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 app.include_router(health.router, tags=["health"])

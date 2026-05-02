@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     active_universe_min_price: float = 5.0  # exclude penny stocks
     active_universe_min_volume: int = 500_000
     active_universe_min_rvol: float = 1.2   # min relative dollar-volume vs 20d avg (1.2 = 20% above avg)
+    # Tickers that are always included in the active universe regardless of
+    # volume/price/rvol filters.  Crypto assets report volume in coin units
+    # (not shares) so equity-oriented filters exclude them incorrectly.
+    # These are appended after the top-N equity ranking and never displace equities.
+    pinned_universe_tickers: list[str] = ["BTC-USD"]
 
     # ── Regime detection ─────────────────────────────────────────────────────
     # Gaussian HMM market regime feature.  States are sorted by mean log-return

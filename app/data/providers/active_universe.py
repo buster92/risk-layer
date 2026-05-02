@@ -29,6 +29,48 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
+def _fetch_pinned_rows(
+    date: dt.date,
+    db: Session,
+    pinned_tickers: list[str],
+    next_rank: int,
+) -> pd.DataFrame:
+    """
+    Fetch price rows for pinned tickers (e.g. BTC-USD) for *date*.
+    These bypass all equity-oriented filters and are always included in the
+    universe, appended after the top-N equity ranking so they never displace
+    an equity slot.  Returns an empty DataFrame if no pinned tickers have
+    price data for *date*.
+    """
+    if not pinned_tickers:
+        return pd.DataFrame()
+
+    rows = (
+        db.query(DailyPrice, Stock.ticker, Stock.sector)
+        .join(Stock, DailyPrice.stock_id == Stock.id)
+        .filter(DailyPrice.date == date)
+        .filter(Stock.ticker.in_(pinned_tickers))
+        .filter(Stock.is_active == True)  # noqa: E712
+        .all()
+    )
+    if not rows:
+        return pd.DataFrame()
+
+    records = []
+    for i, (p, ticker, sector) in enumerate(rows):
+        records.append({
+            "stock_id":             p.stock_id,
+            "ticker":               ticker,
+            "sector":               sector,
+            "close":                p.close,
+            "volume":               p.volume or 0,
+            "dollar_volume":        p.dollar_volume or (p.close * (p.volume or 0)),
+            "rank_by_volume":       next_rank + i,
+            "rank_by_dollar_volume": next_rank + i,
+        })
+    return pd.DataFrame(records)
+
+
 def compute_active_universe(
     date: dt.date,
     db: Session,
@@ -133,6 +175,22 @@ def compute_active_universe(
     df["rank_by_volume"] = df["stock_id"].map(vol_rank)
 
     top = df[df["rank_by_dollar_volume"] <= top_n].copy()
+
+    # ── Append pinned tickers (e.g. BTC-USD) ─────────────────────────────────
+    # Pinned assets bypass all equity-oriented filters and are always included.
+    # They are appended *after* the equity ranking so they never displace an
+    # equity slot.  If a pinned ticker already ranked in the equity top-N (e.g.
+    # BTC-USD passes min_volume on a high-activity day because its volume is in
+    # coin units), we skip adding it again to avoid a duplicate (date, stock_id).
+    pinned_tickers = settings.pinned_universe_tickers
+    if pinned_tickers:
+        already_present = set(top["stock_id"].tolist()) if not top.empty else set()
+        pinned = _fetch_pinned_rows(date, db, pinned_tickers, next_rank=len(top) + 1)
+        if not pinned.empty:
+            pinned = pinned[~pinned["stock_id"].isin(already_present)]
+        if not pinned.empty:
+            top = pd.concat([top, pinned], ignore_index=True)
+
     return top
 
 
