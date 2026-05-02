@@ -45,7 +45,78 @@ movecred/
 
 ---
 
-## Quickstart
+## Running locally
+
+The project runs as **three services** in production (FastAPI, Node auth/billing, static frontend). All three connect to the same remote Supabase database. You can run any combination locally — the most common case is just the FastAPI service.
+
+### Services at a glance
+
+| Service | What it does | Default local port |
+|---|---|---|
+| **FastAPI** (`app/`) | Predictions, board data, model serving | `8000` |
+| **Node** (`server/`) | Auth (Clerk) + billing (Lemon Squeezy) | `3001` |
+| **Frontend** (`frontend/`) | Static HTML/CSS/JS dashboard | any (e.g. `8080`) |
+
+### Prerequisites
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cd server && npm install && cd ..
+```
+
+### 1. FastAPI (required)
+
+The root `.env` already points `DATABASE_URL` at the remote Supabase instance — no local Postgres needed.
+
+```bash
+uvicorn app.api.main:app --reload
+```
+
+Open **http://localhost:8000** — it redirects to the interactive Swagger docs at `/docs`.  
+All `/v1/*` endpoints are live and read from the remote DB.
+
+### 2. Node auth/billing server (optional — only needed for Clerk login and billing)
+
+`server/.env` is pre-configured with the Supabase `DATABASE_URL`. Update `ALLOWED_ORIGIN` if you serve the frontend on a different port than `8080`.
+
+```bash
+cd server && node index.js
+# or for auto-reload:
+cd server && npx nodemon index.js
+```
+
+Server starts on `http://localhost:3001`.
+
+### 3. Frontend (optional — only needed for the dashboard UI)
+
+The frontend is pure static HTML — no build step required.
+
+```bash
+cd frontend && python3 -m http.server 8080
+```
+
+Open **http://localhost:8080**.
+
+`API_BASE` auto-detects `localhost` / `127.0.0.1` and points to `http://localhost:8000/v1`.  
+`AUTH_ORIGIN` similarly falls back to same-origin (Node server must be on `3001`).
+
+### Testing Pro-gated UI without a paid account
+
+Append `?pro=1` to any local URL to force the Pro plan in the frontend:
+
+```
+http://localhost:8080/?pro=1      # full dashboard UI
+http://localhost:8080/app?pro=1   # same with pretty URL
+```
+
+This override is **only active on localhost / 127.0.0.1** — it is a no-op in production.  
+It sets `USER_PLAN = 'pro'` at startup and restores it after the `/me` fetch, so the `/me` response from the Node server cannot overwrite it.
+
+---
+
+## Quickstart (first run from scratch)
 
 ### 1. Install
 
@@ -58,24 +129,12 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit DATABASE_URL and MARKET_DATA_PROVIDER
-```
-// This can also help initializing the database schema
-uvicorn app.api.main:app --reload
-
-### 3. Run PostgreSQL (Docker)
-
-```bash
-docker run -d \
-  --name movecred-db \
-  -e POSTGRES_USER=movecred \
-  -e POSTGRES_PASSWORD=movecred \
-  -e POSTGRES_DB=movecred \
-  -p 5432:5432 \
-  postgres:16
+# DATABASE_URL is already set to the remote Supabase instance.
+# Set MARKET_DATA_PROVIDER=polygon and POLYGON_API_KEY if you have a Polygon key;
+# leave as yfinance for the free prototype path.
 ```
 
-### 4. Backfill historical data
+### 3. Backfill historical data
 
 ```bash
 # Ingests OHLCV + builds point-in-time daily universes from 2019 onward
@@ -84,7 +143,7 @@ python3 scripts/run_backfill.py --start 2019-01-01
 
 > **Warning:** This step may take 30–60 minutes depending on your data provider and internet connection.
 
-### 5. Train models
+### 4. Train models
 
 ```bash
 # Trains all four classifiers with walk-forward validation
@@ -94,15 +153,15 @@ python3 scripts/run_train_all.py
 python3 scripts/run_train_all.py --skip-wf
 ```
 
-### 6. Run daily pipeline (manual)
+### 5. Run daily pipeline (manual)
 
 ```bash
 python3 scripts/run_daily.py
 # or for a specific date:
-python3  scripts/run_daily.py --date 2024-11-15
+python3 scripts/run_daily.py --date 2024-11-15
 ```
 
-### 7. Start the API
+### 6. Start the API
 
 ```bash
 uvicorn app.api.main:app --reload

@@ -55,6 +55,10 @@ SEED_TICKERS = [
 
     # ETFs for benchmark and sector
     "SPY", "QQQ", "IWM", "DIA",
+
+    # Crypto — yfinance supports BTC-USD; volume is in BTC units so it bypasses
+    # equity volume/price filters via the pinned_universe_tickers config
+    "BTC-USD",
 ] + SECTOR_ETFS
 
 

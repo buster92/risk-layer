@@ -25,14 +25,33 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
+_CRYPTO_SECTOR_KEYWORDS = ("cryptocurrency", "crypto", "digital currency", "digital asset")
+
+
+def _normalise_sector(ticker: str, raw_sector: str | None) -> str | None:
+    """Map raw sector strings to canonical SECTOR_ETF_MAP keys.
+
+    yfinance returns None or 'Cryptocurrency' for BTC-USD; we map either to
+    'Crypto' so that SECTOR_ETF_MAP['Crypto'] = 'SPY' is used for alpha_sector_*
+    features instead of falling through to 'Unknown'.
+    """
+    if raw_sector and raw_sector.lower() in _CRYPTO_SECTOR_KEYWORDS:
+        return "Crypto"
+    # Ticker-based fallback for assets whose info dict omits the sector field
+    if raw_sector is None and ticker.endswith("-USD"):
+        return "Crypto"
+    return raw_sector
+
+
 def upsert_stock(db: Session, ticker: str, info: dict) -> Stock:
     """Get or create a Stock row, updating metadata if changed."""
+    sector = _normalise_sector(ticker, info.get("sector"))
     stock = db.query(Stock).filter(Stock.ticker == ticker).first()
     if stock is None:
         stock = Stock(
             ticker=ticker,
             name=info.get("name"),
-            sector=info.get("sector"),
+            sector=sector,
             industry=info.get("industry"),
         )
         db.add(stock)
@@ -40,7 +59,7 @@ def upsert_stock(db: Session, ticker: str, info: dict) -> Stock:
         logger.info("Stock created", ticker=ticker)
     else:
         stock.name = info.get("name") or stock.name
-        stock.sector = info.get("sector") or stock.sector
+        stock.sector = sector or stock.sector
         stock.industry = info.get("industry") or stock.industry
     return stock
 

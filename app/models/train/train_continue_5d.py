@@ -1,8 +1,8 @@
 """
 app/models/train/train_continue_5d.py
 
-Trains the continue_5d classifier using walk-forward cross-validation.
-Uses LightGBM with sigmoid calibration and continuation-specific feature set.
+Trains the continue_5d classifier (undirected — all qualifying days).
+See train_continue_3d.py for the direction-split rationale and experiment results.
 """
 from __future__ import annotations
 

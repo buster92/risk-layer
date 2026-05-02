@@ -63,8 +63,18 @@ def walk_forward_folds(
     train_years: int,
     test_months: int,
     feature_cols: list[str] | None = None,
+    label_col: str | None = None,
 ) -> list[dict]:
+    """
+    Parameters
+    ----------
+    label_col : column name in *dataset* that holds the binary label.
+                Defaults to *target*.  Pass explicitly when the artifact name
+                differs from the label column (e.g. target="continue_3d_up"
+                but label_col="continue_3d").
+    """
     feature_cols = feature_cols or ALL_FEATURES
+    label_col = label_col or target
     dataset = dataset.copy()
     dataset["date"] = pd.to_datetime(dataset["date"])
     dataset = dataset.sort_values("date")
@@ -79,21 +89,18 @@ def walk_forward_folds(
     while fold_start + test_delta <= max_date:
         fold_end = fold_start + test_delta
         # Embargo: exclude rows within `wf_embargo_days` of the test fold boundary.
-        # This prevents leaked labels from bleeding into the training set — a row
-        # labeled at t=fold_start-1 uses forward prices through fold_start+4, so
-        # naively including it in train would constitute look-ahead leakage.
         embargo_cutoff = fold_start - dt.timedelta(days=settings.wf_embargo_days)
-        train = dataset[dataset["date"] < embargo_cutoff].dropna(subset=[target] + feature_cols)
+        train = dataset[dataset["date"] < embargo_cutoff].dropna(subset=[label_col] + feature_cols)
         test = dataset[(dataset["date"] >= fold_start) & (dataset["date"] < fold_end)].dropna(
-            subset=[target] + feature_cols
+            subset=[label_col] + feature_cols
         )
 
-        if len(train) < 200 or len(test) < 20 or len(np.unique(train[target].values)) < 2:
+        if len(train) < 200 or len(test) < 20 or len(np.unique(train[label_col].values)) < 2:
             fold_start = fold_end
             continue
 
-        X_tr, y_tr = train[feature_cols].values, train[target].values.astype(int)
-        X_te, y_te = test[feature_cols].values, test[target].values.astype(int)
+        X_tr, y_tr = train[feature_cols].values, train[label_col].values.astype(int)
+        X_te, y_te = test[feature_cols].values, test[label_col].values.astype(int)
 
         model = CalibratedClassifierCV(make_estimator(), method=settings.calibration_method, cv=5)
         model.fit(X_tr, y_tr)
@@ -128,19 +135,28 @@ def train_and_save(
     skip_wf: bool = False,
     artifact_dir: str | None = None,
     feature_cols: list[str] | None = None,
+    label_col: str | None = None,
 ) -> dict:
+    """
+    Parameters
+    ----------
+    label_col : column in *dataset* holding the binary label.
+                Defaults to *target*.  Use when the artifact name differs from
+                the dataset column (e.g. target="continue_3d_up", label_col="continue_3d").
+    """
     feature_cols = feature_cols or ALL_FEATURES
+    label_col = label_col or target
     artifact_dir = artifact_dir or settings.model_artifacts_path
     wf_results = []
     if not skip_wf:
         wf_results = walk_forward_folds(
             dataset, target, settings.wf_train_years, settings.wf_test_months,
-            feature_cols=feature_cols,
+            feature_cols=feature_cols, label_col=label_col,
         )
 
     # Final model on all labeled data
-    df = dataset.dropna(subset=[target] + feature_cols)
-    X, y = df[feature_cols].values, df[target].values.astype(int)
+    df = dataset.dropna(subset=[label_col] + feature_cols)
+    X, y = df[feature_cols].values, df[label_col].values.astype(int)
     model = CalibratedClassifierCV(make_estimator(), method=settings.calibration_method, cv=5)
     model.fit(X, y)
 

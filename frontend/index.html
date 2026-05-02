@@ -1237,14 +1237,18 @@
 // ─────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────
-let API_BASE = (window.location.hostname === 'localhost')
+const _isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+let API_BASE = _isLocal
   ? 'http://localhost:8000/v1'
   : 'https://risk-layer.onrender.com/v1';
 // Mock mode permanently disabled — dashboard always pulls live data from the FastAPI service.
 let currentSort = 'active';
 
 // ── SaaS plan state ───────────────────────────────────────────────
-let USER_PLAN = 'free';   // 'free' | 'pro'
+// Local dev override: append ?pro=1 to the URL to test Pro-gated UI without a paid account.
+// Only active when running on localhost / 127.0.0.1 — ignored in production.
+const _devForcePro = _isLocal && new URLSearchParams(window.location.search).get('pro') === '1';
+let USER_PLAN = _devForcePro ? 'pro' : 'free';   // 'free' | 'pro'
 let CLERK_INSTANCE = null;
 let CHECKOUT_URL = '';
 
@@ -1882,6 +1886,8 @@ async function loadClerkAndPlan() {
       USER_PLAN = data.plan || 'free';
     }
   } catch { /* non-fatal — stay on free */ }
+  // Restore local override — /me may return 'free' for an unpaid dev account.
+  if (_devForcePro) USER_PLAN = 'pro';
 }
 
 // ─────────────────────────────────────────────────────────────────

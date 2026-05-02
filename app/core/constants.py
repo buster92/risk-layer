@@ -17,6 +17,9 @@ SECTOR_ETF_MAP: dict[str, str] = {
     "Real Estate": "XLRE",
     "Communication Services": "XLC",
     "Unknown": "SPY",
+    # Crypto assets use SPY as a stand-in sector benchmark (no dedicated ETF with
+    # full history).  The mapping keeps alpha_sector_* features valid for BTC-USD.
+    "Crypto": "SPY",
 }
 
 # Exclude SPY — it maps from "Unknown" but is already the benchmark, not a sector ETF
@@ -160,3 +163,19 @@ TARGET_DRAWDOWN_5D = "drawdown_gt_3pct_5d"
 TARGET_MEAN_REVERT_3D = "mean_revert_3d"
 
 ALL_TARGETS = [TARGET_CONTINUE_3D, TARGET_CONTINUE_5D, TARGET_DRAWDOWN_5D, TARGET_MEAN_REVERT_3D]
+
+# ── Directional continuation targets ──────────────────────────────────────────
+# Up-day and down-day continuation are structurally different setups and benefit
+# from separate models.  The predictor routes to these at inference time based on
+# the sign of ret_1d, falling back to the undirected model if artifacts are missing.
+TARGET_CONTINUE_3D_UP = "continue_3d_up"
+TARGET_CONTINUE_3D_DN = "continue_3d_dn"
+TARGET_CONTINUE_5D_UP = "continue_5d_up"
+TARGET_CONTINUE_5D_DN = "continue_5d_dn"
+
+CONTINUATION_DIRECTIONAL_TARGETS = [
+    TARGET_CONTINUE_3D_UP,
+    TARGET_CONTINUE_3D_DN,
+    TARGET_CONTINUE_5D_UP,
+    TARGET_CONTINUE_5D_DN,
+]

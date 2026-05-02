@@ -7,7 +7,7 @@ Morning entry check OR rolling backtest with real-data comparison.
 ────────────────────────────────────────────────────────────────────────────
 SINGLE-DAY MODE  (default)
 ────────────────────────────────────────────────────────────────────────────
-    python scripts/run_entry_check.py                    # uses today
+    python scripts/run_entry_check.py                    # uses latest date with predictions
     python scripts/run_entry_check.py --date 2024-11-15  # specific past day
     python scripts/run_entry_check.py --fee 0.10         # with fee
 
@@ -55,8 +55,20 @@ from app.core.market_calendar import (
     last_closed_trading_day,
     trading_days_between,
 )
+from app.db.models import DailyPrediction
 from app.db.session import get_db
 from app.services.ranking_service import get_top_continuation
+
+
+def _latest_prediction_date() -> dt.date:
+    """Return the most recent date that has prediction rows in the DB.
+
+    Falls back to last_closed_trading_day() if the table is empty (e.g. first
+    run before any daily pipeline has executed).
+    """
+    with get_db() as db:
+        row = db.query(DailyPrediction.date).order_by(DailyPrediction.date.desc()).first()
+    return row.date if row else last_closed_trading_day()
 
 # ── ANSI colours ───────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
@@ -585,7 +597,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--date",
-        help="Prediction date YYYY-MM-DD for single-day mode (default: today)",
+        help="Prediction date YYYY-MM-DD for single-day mode (default: latest date with predictions in DB)",
     )
     parser.add_argument(
         "--backtest",
@@ -630,7 +642,7 @@ def main() -> None:
         prediction_date = (
             dt.date.fromisoformat(args.date)
             if args.date
-            else dt.date.today()
+            else _latest_prediction_date()
         )
         run_single_day(prediction_date=prediction_date, fee_pct=fee_pct, min_p_continue=min_p_continue)
 
