@@ -39,6 +39,14 @@ movecred/
 │   ├── jobs/             daily_ingest, daily_predict, daily_digest, weekly_eval, backfill
 │   ├── services/         stock_analysis, ranking, digest, outcome tracking
 │   └── tests/
+├── risklayer/
+│   └── execution/        rule-based intraday execution engine
+│       ├── entry_evaluator.py      WAIT / ENTER / SKIP decisions
+│       ├── position_manager.py      HOLD / REDUCE / EXIT / TAKE_PROFIT decisions
+│       ├── portfolio_allocator.py   ROTATE / HOLD decisions
+│       ├── decision_types.py        ExecutionDecision, ExecutionAction, TradeMode
+│       ├── config.py                threshold configuration
+│       └── _candles.py              Candle utilities
 ├── scripts/              run_backfill, run_train_all, run_daily, run_entry_check, run_week_validation
 └── docs/
 ```
@@ -204,33 +212,40 @@ Violating any of these would produce deceptively good-looking backtests that fai
 
 ## Utility scripts
 
-### `run_entry_check.py` — Morning entry check
+### `run_entry_check.py` — Morning entry check + execution-engine front-end
 
-Run this at 9:30–9:35 AM ET on any live trading day to evaluate whether the model's top continuation candidate has a clean entry at the open.
+The same script supports two families of modes:
+
+**Legacy paths** (unchanged behaviour — call without `--mode`):
 
 ```bash
 python3 scripts/run_entry_check.py                    # default: today's predictions
 python3 scripts/run_entry_check.py --date 2024-11-15  # evaluate a specific past day
+python3 scripts/run_entry_check.py --backtest --days 30 --fee 0.10
 ```
 
-**What it does:**
+The legacy single-day path loads the top continuation candidate, downloads OHLCV + intraday via yfinance, computes 14-day ATR, and prints two simple gap-vs-ATR verdicts (`BUY / CAUTION / SKIP` at 0.5x / 1.0x cutoffs). When the open verdict is `BUY` it suggests a 1-ATR stop and 2-ATR target. If no stock passes `p_continue_3d ≥ 0.45` and a favorable classification it prints `NO SETUP TODAY` — do not substitute a neutral stock, wait for the next session.
 
-Loads the top continuation candidate from the specified date's model predictions (via `get_top_continuation`). Downloads recent OHLCV and live intraday data via yfinance, computes 14-day ATR, and prints two verdicts:
+**Execution-engine modes** (rule-based, structured `ExecutionDecision` output — see "Daily workflow" below).
 
-- `OPEN ENTRY` — was the open-price entry clean relative to ATR?
-- `CURRENT` — is the current price still a valid entry right now?
+```bash
+# Pre/at-open candidate analysis (0–30 min entry timing)
+python3 scripts/run_entry_check.py --mode entry
+python3 scripts/run_entry_check.py --mode entry --ticker IWM
 
-**Verdict thresholds (gap / ATR):**
+# 15-minute check on an open paper position
+python3 scripts/run_entry_check.py --mode manage \
+    --paper-position-file data/paper_positions/XLY.json
 
-| Ratio | Verdict | Meaning |
-|---|---|---|
-| < 0.5x | `BUY / CLEAN ENTRY` | Entry is within normal range; edge intact |
-| 0.5–1.0x | `CAUTION` | Gap is marginal; consider reducing size or waiting |
-| ≥ 1.0x | `SKIP` | Move too extreme; model edge is gone for today |
+# Held position vs today's top RiskLayer candidate
+python3 scripts/run_entry_check.py --mode portfolio \
+    --paper-position-file data/paper_positions/XLY.json
 
-If no stock passes the minimum signal threshold (`p_continue_3d ≥ 0.45`, favorable classification), the script prints `NO SETUP TODAY` and exits. Do not substitute a neutral stock — wait for the next session.
+# Add --json to also persist the decision to
+# data/execution_decisions/YYYY-MM-DD/{ticker}.json
+```
 
-When the open verdict is `BUY`, the script also prints a suggested stop (1 ATR from open) and a 3-day target (2 ATR from open).
+The execution engine is **advisory only** — it prints / writes recommendations and never places broker orders or moves money. There is **no LLM in the decision path**; every output is the result of pure-Python rule evaluation against the thresholds in `risklayer/execution/config.py`.
 
 ---
 
@@ -294,12 +309,125 @@ Tests cover:
 
 ---
 
-## Explicitly out of scope for V1
+## V2 additions
 
-- Intraday mode
+- [x] **Intraday execution layer** (`risklayer.execution`) — rule-based WHEN/HOW decisions
+  - Entry evaluation (0–30 min post-open)
+  - Position management (15-minute updates with stop/target logic)
+  - Portfolio rotation (compare open positions to new candidates)
+  - All decisions deterministic, threshold-driven, fully transparent with reasons
+
+---
+
+## Execution engine — daily workflow
+
+**Mental model.** RiskLayer (the model layer under `app/`) decides **WHAT** to trade. The execution engine under `risklayer/execution/` decides **WHEN** and **HOW** to act on that pick. The engine is rule-based, deterministic, advisory only — no broker is wired in, no LLM is in the decision path.
+
+### Three modes
+
+| Mode | When to run | What it answers |
+|---|---|---|
+| `--mode entry` | 9:30 → 10:00 ET | Should I enter the top candidate today? When? At what stop / target? |
+| `--mode manage` | every 15 min while in a position | Hold, partial-exit, full-exit, or move stop? |
+| `--mode portfolio` | next morning if a position is still open | Stay in the current name or rotate into today's new top pick? |
+
+Each mode prints a banner and a structured decision (action, mode, confidence, suggested stop / TP, list of reasons with stable codes like `RECLAIM_HELD`, `EDGE_COLLAPSE`, `STRONG_BETTER`, …). Add `--json` to also write the same payload to `data/execution_decisions/YYYY-MM-DD/{ticker}.json`.
+
+### A typical day
+
+```bash
+# 1. (Pre-market or at 9:30) — make sure today's predictions exist.
+python3 scripts/run_daily.py --date $(date +%F)
+
+# 2. (~9:30–9:35 ET) — quick gap sanity check (legacy path, optional).
+python3 scripts/run_entry_check.py
+
+# 3. (9:35 ET) — first entry evaluation.  Likely WAIT (open-noise window, 0–5 min).
+python3 scripts/run_entry_check.py --mode entry --json
+
+# 4. (9:40–10:00 ET) — re-run as the reclaim pattern develops.
+python3 scripts/run_entry_check.py --mode entry
+# Action will become ENTER / SKIP / WAIT depending on the intraday pattern.
+# If ENTER: write the position to data/paper_positions/{TICKER}.json (see schema below).
+
+# 5. (every 15 min while holding) — manage the open position.
+python3 scripts/run_entry_check.py --mode manage \
+    --paper-position-file data/paper_positions/IWM.json --json
+# Watch for HOLD / REDUCE / TAKE_PROFIT_PARTIAL / TAKE_PROFIT_FULL / EXIT.
+
+# 6. (next morning, if still holding) — compare against the new top pick.
+python3 scripts/run_entry_check.py --mode portfolio \
+    --paper-position-file data/paper_positions/IWM.json --json
+# HOLD if Δscore < 0.08, partial ROTATE if 0.08 ≤ Δ < 0.15, strong ROTATE if Δ ≥ 0.15,
+# full ROTATE if the current position is invalidated.
+```
+
+### Paper-position JSON format
+
+`--mode manage` and `--mode portfolio` both load an open position from a small JSON file. Required keys are in **bold**:
+
+```json
+{
+  "ticker": "IWM",
+  "entry_price": 279.10,
+  "shares": 50,
+  "entry_time": "2026-05-01T13:42:00+00:00",
+  "stop_loss": 277.90,
+  "take_profit": 281.50,
+  "mode": "CONFIRMED_RECLAIM",
+  "invalidation_level": 278.20,
+  "stop_at_breakeven": false,
+  "entry_metrics": {
+    "p_continue_5d": 0.58,
+    "p_drawdown_5d": 0.27,
+    "risk_score": 0.20,
+    "setup_quality_score": 0.49
+  }
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `ticker` | yes | Upper-cased on load |
+| `entry_price` | yes | Filled price per share |
+| `shares` | yes | Position size (used for unrealized-PnL display) |
+| `entry_time` | yes | ISO-8601 timestamp |
+| `stop_loss` | yes | Initial hard stop — if `latest_price <= stop_loss` the engine returns `EXIT` |
+| `take_profit` | yes | If `latest_price >= take_profit` the engine returns `TAKE_PROFIT_FULL` |
+| `mode` | optional | `OPEN_ENTRY` (default), `CONFIRMED_RECLAIM`, or `SWING_HOLD` |
+| `invalidation_level` | optional | Price below which the thesis dies; defaults to `stop_loss` |
+| `stop_at_breakeven` | optional | Set to `true` once you've moved the stop to entry — suppresses the reminder |
+| `entry_metrics` | optional but strongly recommended | The RiskLayer metrics captured at entry — used to detect edge decay (`p_continue_5d` drop, `p_drawdown_5d` rise). Without these the engine cannot suggest `REDUCE`. |
+
+There is no broker call. To "execute" the engine's recommendation you act manually (paper or real) and update the JSON file accordingly — e.g. set `stop_at_breakeven: true` after moving your stop, raise `stop_loss` after a partial take-profit, or delete the file once you're flat.
+
+### Threshold reference (defaults from `risklayer/execution/config.py`)
+
+| Threshold | Default | Used by |
+|---|---|---|
+| `open_noise_minutes` | 5 | Entry — first-N-minutes WAIT window |
+| `entry_window_minutes` | 30 | Entry — outside this window, decisions are flagged |
+| `max_open_gap_atr` | 0.8 | Entry — `\|open - prev_close\| / ATR ≥ this → SKIP` |
+| `max_current_extension_atr` | 0.8 | Entry — `\|latest - open\| / ATR ≥ this → SKIP/WAIT` |
+| `reclaim_hold_candles` | 2 | Entry — consecutive 1m closes above the reclaim level |
+| `reduce_p_continue_drop` | 0.08 | Manage — REDUCE 30% if `p_continue_5d` drops by ≥ this |
+| `reduce_drawdown_rise` | 0.10 | Manage — REDUCE 30% if `p_drawdown_5d` rises by ≥ this |
+| `exit_p_continue_threshold` | 0.50 | Manage — EXIT if both edge thresholds are breached |
+| `exit_drawdown_threshold` | 0.40 | Manage — EXIT if both edge thresholds are breached |
+| `breakeven_r_multiple` | 1.0 | Manage — at this R, suggest moving stop to break-even |
+| `partial_tp_r_multiple` | 1.5 | Manage — at this R, allow `TAKE_PROFIT_PARTIAL` (40%) |
+| `rotation_score_delta` | 0.08 | Portfolio — minimum score Δ to consider rotating |
+| `strong_rotation_score_delta` | 0.15 | Portfolio — Δ that justifies a 50–70% rotate |
+
+Override per-call by constructing an `ExecutionConfig(...)` and passing it to `evaluate_entry / manage_position / evaluate_rotation`.
+
+---
+
+## Explicitly out of scope
+
 - News / NLP ingestion
 - Options activity context
-- LLM-generated interpretations
-- Portfolio-level layer
+- LLM-generated interpretations for trade decisions
+- Portfolio-level optimization
 - Mobile app
-- Broker integrations
+- Broker integrations (handle externally)
